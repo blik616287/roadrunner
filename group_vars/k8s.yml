@@ -1,0 +1,52 @@
+---
+# ── Model Definitions ────────────────────────────────────────────────
+# Single source of truth for all model names across playbooks and Helm charts.
+# Keyed by ROLE — to swap a model, change its entry here.
+#
+# Fields:
+#   name     — short identifier used in k8s resource names
+#   tag      — full pull tag (ollama tag or HuggingFace repo)
+#   source   — "ollama" or "huggingface" (controls download method)
+#   namespace, pvc, size — download/storage config
+#
+# Role-specific optional fields:
+#   served_model_name  — vLLM --served-model-name (extract)
+#   num_ctx            — context window / max-model-len (extract)
+
+models:
+  extract:
+    name: "qwen3-8b"
+    tag: "Qwen/Qwen3-8B"
+    source: huggingface
+    namespace: graphrag
+    pvc: vllm-extract-data
+    size: 20Gi
+    num_ctx: "8192"
+    served_model_name: "qwen3-8b-extract"
+
+  embed:
+    name: "qwen3-embedding"
+    tag: "qwen3-embedding:0.6b"
+    source: ollama
+    namespace: graphrag
+    pvc: ollama-embed-data
+    size: 5Gi
+    mode: "dedicated"
+
+  reranker:
+    name: "bge-reranker-v2-m3"
+    tag: "BAAI/bge-reranker-v2-m3"
+    source: huggingface
+    namespace: graphrag
+    pvc: vllm-rerank-data
+    size: 5Gi
+
+# ── GraphRAG Pipeline Settings ───────────────────────────────────────
+graphrag:
+  ingest_worker_replicas: 4
+  code_preprocessor_replicas: 2
+  queue_scaler:
+    poll_interval: 15
+    burst_threshold: 10
+    burst_hysteresis_up: 3
+    burst_hysteresis_down: 5

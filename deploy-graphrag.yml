@@ -1,0 +1,317 @@
+---
+- name: Deploy GraphRAG stack on Kubernetes
+  hosts: k8s
+  become: true
+  vars:
+    local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
+    kubeconfig: "/home/{{ ansible_env.SUDO_USER | default('b') }}/.kube/config"
+    chart_dir: "{{ playbook_dir }}/charts/graphrag"
+    apps_dir: "{{ playbook_dir }}/apps"
+
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+
+  tasks:
+    # ── Build container images (nerdctl + buildkit → containerd k8s.io) ─
+    - name: Check if code-preprocessor image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-code-preprocessor | grep -q .
+      register: preprocessor_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build code-preprocessor image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-code-preprocessor:latest {{ apps_dir }}/code-preprocessor/
+      when: preprocessor_image_check.rc != 0
+      timeout: 600
+
+    - name: Check if lightrag image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-lightrag | grep -q .
+      register: lightrag_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build lightrag image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-lightrag:v2 {{ apps_dir }}/lightrag/
+      when: lightrag_image_check.rc != 0
+      timeout: 900
+
+    # ── Build orchestrator image ─────────────────────────────────
+    - name: Check if orchestrator image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-orchestrator | grep -q .
+      register: orchestrator_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build orchestrator image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-orchestrator:latest {{ apps_dir }}/orchestrator/
+      when: orchestrator_image_check.rc != 0
+      timeout: 600
+
+    # ── Build ingest-worker image ──────────────────────────────────
+    - name: Check if ingest-worker image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-ingest-worker | grep -q .
+      register: ingest_worker_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build ingest-worker image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-ingest-worker:latest {{ apps_dir }}/ingest-worker/
+      when: ingest_worker_image_check.rc != 0
+      timeout: 600
+
+    # ── Build ingestion-ui image ──────────────────────────────────
+    - name: Check if ingestion-ui image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-ingestion-ui | grep -q .
+      register: ingestion_ui_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build ingestion-ui image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-ingestion-ui:latest {{ apps_dir }}/ingestion-ui/
+      when: ingestion_ui_image_check.rc != 0
+      timeout: 600
+
+    # ── Build queue-scaler image ──────────────────────────────────
+    - name: Check if queue-scaler image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-queue-scaler | grep -q .
+      register: queue_scaler_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build queue-scaler image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-queue-scaler:latest {{ apps_dir }}/queue-scaler/
+      when: queue_scaler_image_check.rc != 0
+      timeout: 300
+
+    # ── Deploy Helm chart ──────────────────────────────────────────
+    - name: Clean up stuck Helm release if needed
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        status=$(helm status graphrag -n graphrag -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['status'])" 2>/dev/null || echo "absent")
+        if [ "$status" = "pending-install" ] || [ "$status" = "failed" ]; then
+          helm uninstall graphrag -n graphrag 2>/dev/null || true
+          echo "cleaned"
+        else
+          echo "ok"
+        fi
+      register: helm_cleanup
+      changed_when: "'cleaned' in helm_cleanup.stdout"
+
+    - name: Deploy graphrag Helm chart
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        helm upgrade --install graphrag {{ chart_dir }} \
+          --namespace graphrag \
+          --create-namespace \
+          --set extraction.model={{ models.extract.tag }} \
+          --set extraction.servedModelName={{ models.extract.served_model_name }} \
+          --set extraction.maxModelLen={{ models.extract.num_ctx }} \
+          --set embedding.model={{ models.embed.tag }} \
+          --set embedding.mode={{ models.embed.mode | default('dedicated') }} \
+          --set lightrag.llm.model={{ models.extract.served_model_name }} \
+          --set lightrag.llm.numCtx={{ models.extract.num_ctx }} \
+          --set lightrag.embeddingConfig.model={{ models.embed.tag }} \
+          --set reranker.model={{ models.reranker.tag }} \
+          --set lightrag.rerank.model={{ models.reranker.tag }} \
+          --set ingestWorker.replicas={{ graphrag.ingest_worker_replicas }} \
+          --set codePreprocessor.replicas={{ graphrag.code_preprocessor_replicas }} \
+          --set queueScaler.pollInterval={{ graphrag.queue_scaler.poll_interval }} \
+          --set queueScaler.burstThreshold={{ graphrag.queue_scaler.burst_threshold }} \
+          --set queueScaler.hysteresisUp={{ graphrag.queue_scaler.burst_hysteresis_up }} \
+          --set queueScaler.hysteresisDown={{ graphrag.queue_scaler.burst_hysteresis_down }} \
+          --wait --timeout 15m
+      register: chart_install
+
+    - name: Show Helm install result
+      debug:
+        msg: "{{ chart_install.stdout_lines }}"
+
+    # ── Wait for pods ──────────────────────────────────────────────
+    - name: Wait for Neo4j pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=neo4j --timeout=120s
+      retries: 3
+      delay: 10
+      register: neo4j_ready
+      until: neo4j_ready.rc == 0
+
+    - name: Wait for PostgreSQL pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=postgresql --timeout=120s
+      retries: 3
+      delay: 10
+      register: pg_ready
+      until: pg_ready.rc == 0
+
+    - name: Verify embedding model is loaded
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag exec deploy/ollama-embed -- ollama list
+      retries: 24
+      delay: 15
+      register: embed_verify
+      until: embed_verify.rc == 0 and models.embed.tag in embed_verify.stdout
+
+    - name: Wait for vLLM extraction to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=vllm-extract --timeout=300s
+      retries: 3
+      delay: 15
+      register: extract_ready
+      until: extract_ready.rc == 0
+
+    - name: Wait for vLLM reranker to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=vllm-rerank --timeout=300s
+      retries: 3
+      delay: 15
+      register: rerank_verify
+      until: rerank_verify.rc == 0
+
+    - name: Wait for LightRAG pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=lightrag --timeout=300s
+      retries: 3
+      delay: 15
+      register: lightrag_ready
+      until: lightrag_ready.rc == 0
+
+    - name: Wait for code-preprocessor pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=code-preprocessor --timeout=120s
+      retries: 3
+      delay: 10
+      register: preprocessor_ready
+      until: preprocessor_ready.rc == 0
+
+    - name: Wait for Redis pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=redis --timeout=120s
+      retries: 3
+      delay: 10
+      register: redis_ready
+      until: redis_ready.rc == 0
+
+    - name: Wait for orchestrator pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=orchestrator --timeout=120s
+      retries: 3
+      delay: 10
+      register: orchestrator_ready
+      until: orchestrator_ready.rc == 0
+
+    - name: Wait for NATS pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=nats --timeout=120s
+      retries: 3
+      delay: 10
+      register: nats_ready
+      until: nats_ready.rc == 0
+
+    - name: Wait for ingest-worker pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=ingest-worker --timeout=120s
+      retries: 3
+      delay: 10
+      register: ingest_worker_ready
+      until: ingest_worker_ready.rc == 0
+
+    - name: Wait for ingestion-ui pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=ingestion-ui --timeout=120s
+      retries: 3
+      delay: 10
+      register: ingestion_ui_ready
+      until: ingestion_ui_ready.rc == 0
+
+    - name: Wait for queue-scaler pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=queue-scaler --timeout=120s
+      retries: 3
+      delay: 10
+      register: queue_scaler_ready
+      until: queue_scaler_ready.rc == 0
+
+    # ── Enable pgvector extension ──────────────────────────────────
+    - name: Enable pgvector extension in PostgreSQL
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag exec deploy/postgresql -- \
+          psql -U lightrag -d lightrag -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      register: pgvector_ext
+      changed_when: "'CREATE EXTENSION' in pgvector_ext.stdout"
+
+    # ── Show status ────────────────────────────────────────────────
+    - name: Show deployment status
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        echo "=== GraphRAG Pods ==="
+        kubectl get pods -n graphrag -o wide
+        echo ""
+        echo "=== GraphRAG Services ==="
+        kubectl get svc -n graphrag
+        echo ""
+        echo "=== Model Status ==="
+        echo "Embedding (Ollama):"
+        kubectl -n graphrag exec deploy/ollama-embed -- ollama list 2>/dev/null || echo "  (not ready)"
+        echo "Extraction (vLLM):"
+        kubectl -n graphrag get pod -l app=vllm-extract --no-headers 2>/dev/null || echo "  (not running)"
+        echo "Reranker (vLLM):"
+        kubectl -n graphrag get pod -l app=vllm-rerank --no-headers 2>/dev/null || echo "  (not running)"
+        echo "Queue Scaler:"
+        kubectl -n graphrag get pod -l app=queue-scaler --no-headers 2>/dev/null || echo "  (not running)"
+        echo ""
+        echo "=== Endpoints ==="
+        echo "LightRAG API:         http://localhost:31436"
+        echo "Neo4j Browser:        http://localhost:31474"
+        echo "Code Preprocessor:    http://localhost:31490"
+        echo "GraphRAG Orchestrator: http://localhost:31800"
+        echo "Ingestion UI:         http://localhost:31300"
+        echo ""
+        echo "=== Cluster-internal ==="
+        echo "LightRAG:             http://lightrag.graphrag.svc.cluster.local:9621"
+        echo "Neo4j Bolt:           bolt://neo4j.graphrag.svc.cluster.local:7687"
+        echo "PostgreSQL:           postgresql.graphrag.svc.cluster.local:5432"
+        echo "Embedding (Ollama):   http://ollama-embed.graphrag.svc.cluster.local:11434"
+        echo "Extraction (vLLM):    http://vllm-extract.graphrag.svc.cluster.local:8000"
+        echo "Reranker (vLLM):      http://vllm-rerank.graphrag.svc.cluster.local:8000"
+        echo "Code Preprocessor:    http://code-preprocessor.graphrag.svc.cluster.local:8090"
+        echo "Orchestrator:         http://orchestrator.graphrag.svc.cluster.local:8100"
+        echo "NATS:                 nats://nats.graphrag.svc.cluster.local:4222"
+        echo "Ingest Worker:        (NATS consumer on INGEST stream, {{ graphrag.ingest_worker_replicas }} replicas)"
+        echo "Queue Scaler:         (NATS queue-depth auto-scaler)"
+        echo "Ingestion UI:         http://ingestion-ui.graphrag.svc.cluster.local:8080"
+      register: status
+
+    - name: Display status
+      debug:
+        var: status.stdout_lines

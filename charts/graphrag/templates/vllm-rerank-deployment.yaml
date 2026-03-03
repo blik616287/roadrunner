@@ -1,0 +1,83 @@
+{{- if .Values.reranker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-rerank
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: vllm-rerank
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-rerank
+  template:
+    metadata:
+      labels:
+        app: vllm-rerank
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      runtimeClassName: nvidia
+      containers:
+        - name: vllm
+          image: {{ .Values.reranker.image }}
+          args:
+            - /data
+            - --host
+            - "0.0.0.0"
+            - --port
+            - {{ .Values.reranker.port | quote }}
+            - --served-model-name
+            - {{ .Values.reranker.model }}
+            - --gpu-memory-utilization
+            - "0.05"
+            - --trust-remote-code
+          env:
+            - name: CUDA_MPS_PIPE_DIRECTORY
+              value: "/run/nvidia/mps/nvidia.com/gpu/pipe"
+            - name: CUDA_MPS_LOG_DIRECTORY
+              value: "/run/nvidia/mps/nvidia.com/gpu/log"
+          ports:
+            - containerPort: {{ .Values.reranker.port }}
+              name: http
+          resources:
+            {{- toYaml .Values.reranker.resources | nindent 12 }}
+          volumeMounts:
+            - name: model-data
+              mountPath: /data
+              readOnly: true
+            - name: mps-root
+              mountPath: /run/nvidia/mps
+            - name: mps-shm
+              mountPath: /dev/shm
+          startupProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.reranker.port }}
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.reranker.port }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: model-data
+          persistentVolumeClaim:
+            claimName: vllm-rerank-data
+        - name: mps-root
+          hostPath:
+            path: /run/nvidia/mps
+            type: Directory
+        - name: mps-shm
+          hostPath:
+            path: /run/nvidia/mps/shm
+            type: Directory
+{{- end }}

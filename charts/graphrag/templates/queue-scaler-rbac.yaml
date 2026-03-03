@@ -1,0 +1,36 @@
+{{- if .Values.queueScaler.enabled }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: queue-scaler
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: queue-scaler
+  namespace: {{ .Values.namespace }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    resourceNames: ["vllm-rerank"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: queue-scaler
+  namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: queue-scaler
+subjects:
+  - kind: ServiceAccount
+    name: queue-scaler
+    namespace: {{ .Values.namespace }}
+{{- end }}

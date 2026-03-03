@@ -1,0 +1,96 @@
+{{- if .Values.extraction.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-extract
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: vllm-extract
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-extract
+  template:
+    metadata:
+      labels:
+        app: vllm-extract
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      runtimeClassName: nvidia
+      containers:
+        - name: vllm
+          image: {{ .Values.extraction.image }}
+          args:
+            - /data
+            - --host
+            - "0.0.0.0"
+            - --port
+            - {{ .Values.extraction.port | quote }}
+            - --served-model-name
+            - {{ .Values.extraction.servedModelName }}
+            - --max-model-len
+            - {{ .Values.extraction.maxModelLen | quote }}
+            - --max-num-seqs
+            - {{ .Values.extraction.maxNumSeqs | quote }}
+            - --gpu-memory-utilization
+            - {{ .Values.extraction.gpuMemoryUtilization | quote }}
+            - --enable-prefix-caching
+            - --trust-remote-code
+            - --chat-template
+            - /etc/vllm/chat_template.jinja
+          env:
+            - name: CUDA_MPS_PIPE_DIRECTORY
+              value: "/run/nvidia/mps/nvidia.com/gpu/pipe"
+            - name: CUDA_MPS_LOG_DIRECTORY
+              value: "/run/nvidia/mps/nvidia.com/gpu/log"
+          ports:
+            - containerPort: {{ .Values.extraction.port }}
+              name: http
+          resources:
+            {{- toYaml .Values.extraction.resources | nindent 12 }}
+          volumeMounts:
+            - name: model-data
+              mountPath: /data
+              readOnly: true
+            - name: mps-root
+              mountPath: /run/nvidia/mps
+            - name: mps-shm
+              mountPath: /dev/shm
+            - name: chat-template
+              mountPath: /etc/vllm
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.extraction.port }}
+            failureThreshold: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.extraction.port }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: model-data
+          persistentVolumeClaim:
+            claimName: vllm-extract-data
+        - name: mps-root
+          hostPath:
+            path: /run/nvidia/mps
+            type: Directory
+        - name: mps-shm
+          hostPath:
+            path: /run/nvidia/mps/shm
+            type: Directory
+        - name: chat-template
+          configMap:
+            name: vllm-extract-chat-template
+{{- end }}
