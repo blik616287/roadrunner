@@ -1,0 +1,18 @@
+{{- if .Values.queueScaler.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: queue-scaler-config
+  namespace: {{ .Values.namespace }}
+data:
+  NATS_MONITOR_URL: "http://nats.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.nats.monitorPort }}"
+  ORCHESTRATOR_URL: "http://orchestrator.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orchestrator.port }}"
+  K8S_NAMESPACE: {{ .Values.namespace }}
+  RERANKER_DEPLOYMENT: {{ .Values.queueScaler.rerankerDeployment | quote }}
+  RERANKER_NORMAL_REPLICAS: {{ .Values.queueScaler.rerankerNormalReplicas | quote }}
+  RERANKER_BURST_REPLICAS: {{ .Values.queueScaler.rerankerBurstReplicas | quote }}
+  POLL_INTERVAL: {{ .Values.queueScaler.pollInterval | quote }}
+  BURST_THRESHOLD: {{ .Values.queueScaler.burstThreshold | quote }}
+  HYSTERESIS_UP: {{ .Values.queueScaler.hysteresisUp | quote }}
+  HYSTERESIS_DOWN: {{ .Values.queueScaler.hysteresisDown | quote }}
+{{- end }}

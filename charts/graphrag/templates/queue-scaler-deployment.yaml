@@ -1,0 +1,43 @@
+{{- if .Values.queueScaler.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: queue-scaler
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: queue-scaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: queue-scaler
+  template:
+    metadata:
+      labels:
+        app: queue-scaler
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: queue-scaler
+      enableServiceLinks: false
+      initContainers:
+        - name: wait-nats
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z nats.{{ .Values.namespace }}.svc.cluster.local {{ .Values.nats.clientPort }}; do echo "waiting for nats..."; sleep 3; done']
+      containers:
+        - name: queue-scaler
+          image: {{ .Values.queueScaler.image }}
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: queue-scaler-config
+          resources:
+            {{- toYaml .Values.queueScaler.resources | nindent 12 }}
+          readinessProbe:
+            exec:
+              command: ['test', '-f', '/tmp/ready']
+            initialDelaySeconds: 5
+            periodSeconds: 10
+{{- end }}

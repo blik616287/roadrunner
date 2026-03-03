@@ -1,0 +1,53 @@
+{{- if .Values.lightrag.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lightrag-config
+  namespace: {{ .Values.namespace }}
+data:
+  WORKSPACE: "default"
+  HOST: "0.0.0.0"
+  PORT: {{ .Values.lightrag.port | quote }}
+  WORKING_DIR: "/app/data"
+  INPUT_DIR: "/app/data/inputs"
+  # LLM for entity extraction (OpenAI-compatible vLLM)
+  LLM_BINDING: {{ .Values.lightrag.llm.binding }}
+  LLM_MODEL: {{ .Values.lightrag.llm.model }}
+  LLM_BINDING_HOST: {{ .Values.lightrag.llm.host }}
+  LLM_BINDING_API_KEY: "EMPTY"
+  MAX_ASYNC: "16"
+  MAX_PARALLEL_INSERT: "8"
+  # Embedding
+  {{- if eq (.Values.embedding.mode | default "dedicated") "unified" }}
+  EMBEDDING_BINDING: "openai"
+  EMBEDDING_MODEL: {{ .Values.extraction.servedModelName }}
+  EMBEDDING_BINDING_HOST: "http://vllm-extract.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.extraction.port }}/v1"
+  {{- else }}
+  EMBEDDING_BINDING: {{ .Values.lightrag.embeddingConfig.binding }}
+  EMBEDDING_MODEL: {{ .Values.lightrag.embeddingConfig.model }}
+  EMBEDDING_BINDING_HOST: {{ .Values.lightrag.embeddingConfig.host }}
+  {{- end }}
+  EMBEDDING_DIM: {{ .Values.lightrag.embeddingConfig.dim | quote }}
+  # Reranker
+  {{- if .Values.lightrag.rerank.enabled }}
+  ENABLE_RERANK: "true"
+  RERANK_BINDING: {{ .Values.lightrag.rerank.binding }}
+  RERANK_MODEL: {{ .Values.lightrag.rerank.model }}
+  RERANK_BINDING_HOST: {{ .Values.lightrag.rerank.host }}
+  {{- end }}
+  # Storage backends
+  LIGHTRAG_KV_STORAGE: {{ .Values.lightrag.storage.kv }}
+  LIGHTRAG_DOC_STATUS_STORAGE: {{ .Values.lightrag.storage.docStatus }}
+  LIGHTRAG_GRAPH_STORAGE: {{ .Values.lightrag.storage.graph }}
+  LIGHTRAG_VECTOR_STORAGE: {{ .Values.lightrag.storage.vector }}
+  # Neo4j
+  NEO4J_URI: "bolt://neo4j.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.neo4j.boltPort }}"
+  NEO4J_USERNAME: {{ .Values.neo4j.auth.username }}
+  NEO4J_PASSWORD: {{ .Values.neo4j.auth.password }}
+  # PostgreSQL
+  POSTGRES_HOST: "postgresql.{{ .Values.namespace }}.svc.cluster.local"
+  POSTGRES_PORT: {{ .Values.postgresql.port | quote }}
+  POSTGRES_USER: {{ .Values.postgresql.auth.username }}
+  POSTGRES_PASSWORD: {{ .Values.postgresql.auth.password }}
+  POSTGRES_DATABASE: {{ .Values.postgresql.auth.database }}
+{{- end }}

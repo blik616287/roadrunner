@@ -1,0 +1,10 @@
+{{- if .Values.extraction.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-extract-chat-template
+  namespace: {{ .Values.namespace }}
+data:
+  chat_template.jinja: |
+{{ .Files.Get "files/qwen3-no-think.jinja" | indent 4 }}
+{{- end }}
