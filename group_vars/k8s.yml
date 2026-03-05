@@ -1,4 +1,9 @@
 ---
+# ── HuggingFace Authentication ──────────────────────────────────────
+# Token used by download-models.yml to pull gated models.
+# Override at runtime:  -e hf_token=hf_xxx
+hf_token: "{{ lookup('env', 'HF_TOKEN') }}"
+
 # ── Model Definitions ────────────────────────────────────────────────
 # Single source of truth for all model names across playbooks and Helm charts.
 # Keyed by ROLE — to swap a model, change its entry here.
