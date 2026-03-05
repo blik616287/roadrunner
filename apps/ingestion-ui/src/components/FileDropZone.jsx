@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 
 const ARCHIVE_EXTS = ['.tar.gz', '.tgz', '.zip'];
 
@@ -53,6 +53,7 @@ async function getDroppedFiles(dataTransfer) {
 
 export default function FileDropZone({ onUpload, disabled }) {
   const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef(null);
 
   const processFiles = useCallback(
     (fileList) => {
@@ -72,29 +73,32 @@ export default function FileDropZone({ onUpload, disabled }) {
     processFiles(files);
   };
 
+  const onFileChange = (e) => {
+    const files = [...e.target.files].map((f) => ({
+      file: f,
+      path: f.webkitRelativePath || f.name,
+    }));
+    processFiles(files);
+    e.target.value = '';
+  };
+
   return (
     <div
       onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={onDrop}
+      onClick={() => { if (!disabled) fileInputRef.current?.click(); }}
       className={`border-2 border-dashed rounded-lg p-10 text-center transition-colors ${
         dragOver ? 'border-blue-500 bg-blue-50' : 'border-gray-300 bg-white'
       } ${disabled ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}`}
-      onClick={() => {
-        if (disabled) return;
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.multiple = true;
-        input.onchange = (e) => {
-          const files = [...e.target.files].map((f) => ({
-            file: f,
-            path: f.webkitRelativePath || f.name,
-          }));
-          processFiles(files);
-        };
-        input.click();
-      }}
     >
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={onFileChange}
+      />
       <div className="text-gray-500">
         <p className="text-lg font-medium">Drop files or folders here, or click to browse</p>
         <p className="text-sm mt-1">

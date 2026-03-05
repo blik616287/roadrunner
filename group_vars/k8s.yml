@@ -1,4 +1,9 @@
 ---
+# ── HuggingFace Authentication ──────────────────────────────────────
+# Token used by download-models.yml to pull gated models.
+# Override at runtime:  -e hf_token=hf_xxx
+hf_token: "{{ lookup('env', 'HF_TOKEN') }}"
+
 # ── Model Definitions ────────────────────────────────────────────────
 # Single source of truth for all model names across playbooks and Helm charts.
 # Keyed by ROLE — to swap a model, change its entry here.
@@ -15,21 +20,25 @@
 
 models:
   extract:
-    name: "qwen3-8b"
-    tag: "Qwen/Qwen3-8B"
-    source: huggingface
+    name: "qwen3-30b-a3b"
+    tag: "Qwen/Qwen3-30B-A3B"
+    source: gguf
+    gguf_repo: "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF"
+    gguf_file: "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
+    tokenizer: "Qwen/Qwen3-30B-A3B"
+    quant: "Q4_K_M"
     namespace: graphrag
-    pvc: vllm-extract-data
-    size: 20Gi
+    pvc: model-qwen3-30b-a3b
+    size: 25Gi
     num_ctx: "8192"
-    served_model_name: "qwen3-8b-extract"
+    served_model_name: "qwen3-30b-a3b-extract"
 
   embed:
     name: "qwen3-embedding"
-    tag: "qwen3-embedding:0.6b"
-    source: ollama
+    tag: "Qwen/Qwen3-Embedding-0.6B"
+    source: huggingface
     namespace: graphrag
-    pvc: ollama-embed-data
+    pvc: vllm-embed-data
     size: 5Gi
     mode: "dedicated"
 
@@ -40,6 +49,81 @@ models:
     namespace: graphrag
     pvc: vllm-rerank-data
     size: 5Gi
+
+# ── Test Extraction Models (TESTING.MD) ─────────────────────────────
+# Downloaded to individual PVCs for benchmarking against the baseline.
+# source: gguf  → downloads single GGUF file + tokenizer from base model
+# source: huggingface → full repo snapshot (for native checkpoint formats)
+
+test_models:
+  qwen25-coder-14b:
+    name: "qwen25-coder-14b"
+    tag: "Qwen/Qwen2.5-Coder-14B-Instruct"
+    source: gguf
+    gguf_repo: "bartowski/Qwen2.5-Coder-14B-Instruct-GGUF"
+    gguf_file: "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf"
+    tokenizer: "Qwen/Qwen2.5-Coder-14B-Instruct"
+    quant: "Q4_K_M"
+    namespace: graphrag
+    pvc: model-qwen25-coder-14b
+    size: 10Gi
+
+  qwen25-coder-32b:
+    name: "qwen25-coder-32b"
+    tag: "Qwen/Qwen2.5-Coder-32B-Instruct"
+    source: gguf
+    gguf_repo: "bartowski/Qwen2.5-Coder-32B-Instruct-GGUF"
+    gguf_file: "Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf"
+    tokenizer: "Qwen/Qwen2.5-Coder-32B-Instruct"
+    quant: "Q4_K_M"
+    namespace: graphrag
+    pvc: model-qwen25-coder-32b
+    size: 25Gi
+
+  deepseek-coder-v2-lite:
+    name: "deepseek-coder-v2-lite"
+    tag: "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+    source: gguf
+    gguf_repo: "bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF"
+    gguf_file: "DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf"
+    tokenizer: "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+    quant: "Q4_K_M"
+    namespace: graphrag
+    pvc: model-deepseek-coder-v2-lite
+    size: 15Gi
+
+  mistral-small-31-24b:
+    name: "mistral-small-31-24b"
+    tag: "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+    source: gguf
+    gguf_repo: "bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF"
+    gguf_file: "mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf"
+    tokenizer: "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+    quant: "Q4_K_M"
+    namespace: graphrag
+    pvc: model-mistral-small-31-24b
+    size: 20Gi
+
+  nemotron-nano-30b:
+    name: "nemotron-nano-30b"
+    tag: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4"
+    source: huggingface
+    quant: "NVFP4"
+    namespace: graphrag
+    pvc: model-nemotron-nano-30b
+    size: 20Gi
+
+  phi-4-14b:
+    name: "phi-4-14b"
+    tag: "microsoft/phi-4"
+    source: gguf
+    gguf_repo: "bartowski/phi-4-GGUF"
+    gguf_file: "phi-4-Q4_K_M.gguf"
+    tokenizer: "microsoft/phi-4"
+    quant: "Q4_K_M"
+    namespace: graphrag
+    pvc: model-phi-4-14b
+    size: 10Gi
 
 # ── GraphRAG Pipeline Settings ───────────────────────────────────────
 graphrag:

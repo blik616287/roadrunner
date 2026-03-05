@@ -108,6 +108,11 @@
           --set extraction.model={{ models.extract.tag }} \
           --set extraction.servedModelName={{ models.extract.served_model_name }} \
           --set extraction.maxModelLen={{ models.extract.num_ctx }} \
+{% if models.extract.source == 'gguf' %}
+          --set extraction.modelPath="/data/{{ models.extract.gguf_file }}" \
+          --set extraction.tokenizer="/data/tokenizer" \
+          --set extraction.dtype="half" \
+{% endif %}
           --set embedding.model={{ models.embed.tag }} \
           --set embedding.mode={{ models.embed.mode | default('dedicated') }} \
           --set lightrag.llm.model={{ models.extract.served_model_name }} \

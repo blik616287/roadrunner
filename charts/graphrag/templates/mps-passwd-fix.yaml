@@ -1,0 +1,103 @@
+{{- if .Values.extraction.enabled }}
+# Watches the MPS control daemon and fixes /etc/passwd whenever it restarts.
+# The NVIDIA MPS daemon container ships without a root entry,
+# causing "getpwuid() failed for 0" when UID-0 clients (vLLM, Ollama) connect.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mps-passwd-fixer
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mps-passwd-fixer
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mps-passwd-fixer
+subjects:
+  - kind: ServiceAccount
+    name: mps-passwd-fixer
+    namespace: {{ .Values.namespace }}
+roleRef:
+  kind: ClusterRole
+  name: mps-passwd-fixer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mps-passwd-fixer
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: mps-passwd-fixer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mps-passwd-fixer
+  template:
+    metadata:
+      labels:
+        app: mps-passwd-fixer
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: mps-passwd-fixer
+      containers:
+        - name: fixer
+          image: bitnami/kubectl:latest
+          command:
+            - sh
+            - -c
+            - |
+              apply_fix() {
+                kubectl -n gpu-operator exec daemonset/nvidia-device-plugin-mps-control-daemon \
+                  -c mps-control-daemon-ctr -- \
+                  sh -c 'grep -q "^root:" /etc/passwd || echo "root:x:0:0:root:/root:/bin/sh" >> /etc/passwd' \
+                  && echo "$(date): passwd fix applied" \
+                  || echo "$(date): passwd fix failed"
+              }
+              echo "Waiting for MPS control daemon..."
+              until kubectl -n gpu-operator get pods -l app=nvidia-device-plugin-mps-control-daemon \
+                -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q Running; do
+                sleep 5
+              done
+              apply_fix
+              echo "Watching for MPS daemon restarts..."
+              last_uid=""
+              while true; do
+                uid=$(kubectl -n gpu-operator get pods -l app=nvidia-device-plugin-mps-control-daemon \
+                  -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null)
+                if [ -n "$uid" ] && [ "$uid" != "$last_uid" ]; then
+                  if [ -n "$last_uid" ]; then
+                    echo "$(date): MPS daemon restarted (new UID: $uid), waiting for ready..."
+                    sleep 10
+                    apply_fix
+                  fi
+                  last_uid="$uid"
+                fi
+                sleep 30
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+{{- end }}

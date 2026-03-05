@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ..db import get_pool
 from ..models import JobStatusResponse
+from ..services.nats_client import publish_ingest_job
 
 
 def _parse_result(raw) -> dict | None:
@@ -97,3 +98,50 @@ async def list_jobs(
         ],
         "count": len(rows),
     }
+
+
+@router.post("/v1/jobs/{job_id}/retry")
+async def retry_job(job_id: str):
+    """Retry a failed job by resetting it to queued and re-publishing to NATS."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, job_type, status FROM orchestrator_ingest_jobs WHERE id = $1", job_id
+    )
+    if not row:
+        raise HTTPException(404, f"Job {job_id} not found")
+    if row["status"] != "failed":
+        raise HTTPException(400, f"Job {job_id} is {row['status']}, not failed")
+
+    await pool.execute(
+        """UPDATE orchestrator_ingest_jobs
+           SET status = 'queued', error = NULL, result = '{}',
+               attempts = 0, started_at = NULL, completed_at = NULL
+           WHERE id = $1""",
+        job_id,
+    )
+    await publish_ingest_job(job_id, row["job_type"])
+    return {"retried": job_id}
+
+
+@router.post("/v1/jobs/retry-failed")
+async def retry_all_failed(workspace: str = Query(...)):
+    """Retry all failed jobs in a workspace."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT id, job_type FROM orchestrator_ingest_jobs WHERE workspace = $1 AND status = 'failed'",
+        workspace,
+    )
+    if not rows:
+        return {"retried": 0}
+
+    for r in rows:
+        await pool.execute(
+            """UPDATE orchestrator_ingest_jobs
+               SET status = 'queued', error = NULL, result = '{}',
+                   attempts = 0, started_at = NULL, completed_at = NULL
+               WHERE id = $1""",
+            r["id"],
+        )
+        await publish_ingest_job(r["id"], r["job_type"])
+
+    return {"retried": len(rows), "workspace": workspace}
