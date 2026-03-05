@@ -15,8 +15,9 @@ data:
   LLM_MODEL: {{ .Values.lightrag.llm.model }}
   LLM_BINDING_HOST: {{ .Values.lightrag.llm.host }}
   LLM_BINDING_API_KEY: "EMPTY"
-  MAX_ASYNC: "16"
-  MAX_PARALLEL_INSERT: "8"
+  OPENAI_API_KEY: "EMPTY"
+  MAX_ASYNC: {{ .Values.lightrag.maxAsync | default "8" | quote }}
+  MAX_PARALLEL_INSERT: {{ .Values.lightrag.maxParallelInsert | default "4" | quote }}
   # Embedding
   {{- if eq (.Values.embedding.mode | default "dedicated") "unified" }}
   EMBEDDING_BINDING: "openai"
@@ -50,4 +51,15 @@ data:
   POSTGRES_USER: {{ .Values.postgresql.auth.username }}
   POSTGRES_PASSWORD: {{ .Values.postgresql.auth.password }}
   POSTGRES_DATABASE: {{ .Values.postgresql.auth.database }}
+  # LLM timeout (default 180s, increase for larger/slower models)
+  LLM_TIMEOUT: {{ .Values.lightrag.llmTimeout | default "180" | quote }}
+  # Embedding throughput tuning
+  EMBEDDING_BATCH_NUM: {{ .Values.lightrag.embeddingBatchNum | default "10" | quote }}
+  EMBEDDING_FUNC_MAX_ASYNC: {{ .Values.lightrag.embeddingFuncMaxAsync | default "8" | quote }}
+  EMBEDDING_TIMEOUT: {{ .Values.lightrag.embeddingTimeout | default "30" | quote }}
+  # Extraction optimization patches (workspace_patch.py)
+  CODE_EXTRACTION_PROMPT: {{ .Values.lightrag.codeExtractionPrompt | default "0" | quote }}
+  LLM_MAX_TOKENS: {{ .Values.lightrag.llmMaxTokens | default "0" | quote }}
+  TYPED_RELATIONSHIPS: {{ .Values.lightrag.typedRelationships | default "0" | quote }}
+  PIPELINED_EMBEDDING: {{ .Values.lightrag.pipelinedEmbedding | default "0" | quote }}
 {{- end }}

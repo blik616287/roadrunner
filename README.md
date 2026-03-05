@@ -32,9 +32,9 @@ graph TD
     end
 
     subgraph gpu ["GPU Layer - MPS"]
-        VE["vLLM-extract Qwen3-8B"]
+        VE["vLLM-extract Qwen3-30B-A3B"]
         VR["vLLM-rerank bge-reranker-v2-m3"]
-        OE["ollama-embed qwen3-embedding"]
+        OE["vLLM-embed qwen3-embedding"]
     end
 
     LR --> PG
@@ -114,7 +114,7 @@ This sets up k8s 1.34, containerd, Helm, NVIDIA MPS (3 GPU slices), and Longhorn
 ansible-playbook -i inventory.ini download-models.yml
 ```
 
-Pre-populates persistent volumes with Qwen3-8B (extraction), qwen3-embedding:0.6b (embedding), and bge-reranker-v2-m3 (reranking).
+Pre-populates persistent volumes with Qwen3-30B-A3B Q4_K_M GGUF (extraction), Qwen3-Embedding-0.6B (embedding), and bge-reranker-v2-m3 (reranking).
 
 **3. Deploy the pipeline:**
 
@@ -261,7 +261,7 @@ sequenceDiagram
     end
 
     CP->>LR: POST /documents/text
-    LR->>GPU: Embed via ollama 1024-dim
+    LR->>GPU: Embed via vLLM 1024-dim
     LR->>GPU: Extract entities via vLLM
     LR->>PG: Store vectors in pgvector
     LR->>PG: Store KV and doc status
@@ -276,7 +276,7 @@ sequenceDiagram
 1. **Orchestrator** receives the upload, gzip-compresses the blob into PostgreSQL, creates a job record, and publishes a NATS JetStream message.
 2. **Ingest workers** (4 replicas) pull from NATS, fetch the blob, decompress, and split files. Codebases are extracted from archives with filtering (skip dotfiles, `node_modules`, `__pycache__`, binaries; 1 MB/file limit; 2000 file cap).
 3. **Code preprocessor** (2 replicas) parses code files via tree-sitter into natural-language Markdown descriptions. PDFs are split into 50-page chunks via pdfplumber. Text/Markdown pass through directly.
-4. **LightRAG** receives the processed text, embeds it via ollama (qwen3-embedding, 1024-dim), extracts entities and relations via vLLM (Qwen3-8B), and stores everything in pgvector + Neo4j.
+4. **LightRAG** receives the processed text, embeds it via vLLM (Qwen3-Embedding-0.6B, 1024-dim), extracts entities and relations via vLLM (Qwen3-30B-A3B Q4_K_M), and stores everything in pgvector + Neo4j.
 5. **Ingest worker** polls LightRAG's `/documents/pipeline_status` until indexing completes, then marks the job done.
 
 ### Burst Mode
@@ -308,9 +308,9 @@ Three MPS slices share the GB10's unified 128 GB memory:
 
 | Slice | Model | Purpose |
 |---|---|---|
-| vLLM-extract | Qwen3-8B (BF16) | Entity/relation extraction |
+| vLLM-extract | Qwen3-30B-A3B (Q4_K_M GGUF, ~17 GB) | Entity/relation extraction |
 | vLLM-rerank | bge-reranker-v2-m3 | Query result reranking |
-| ollama-embed | qwen3-embedding:0.6b | 1024-dim document embedding |
+| vLLM-embed | Qwen3-Embedding-0.6B | 1024-dim document embedding |
 
 ### Storage
 
@@ -328,9 +328,9 @@ All model and pipeline settings live in `group_vars/k8s.yml`. To swap a model, c
 ```yaml
 models:
   extract:
-    tag: "Qwen/Qwen3-8B"        # HuggingFace model for entity extraction
+    tag: "Qwen/Qwen3-30B-A3B"    # HuggingFace model for entity extraction (GGUF Q4_K_M)
   embed:
-    tag: "qwen3-embedding:0.6b"  # Ollama model for embeddings
+    tag: "Qwen/Qwen3-Embedding-0.6B"  # vLLM pooling model for embeddings
   reranker:
     tag: "BAAI/bge-reranker-v2-m3"  # HuggingFace model for reranking
 
@@ -370,5 +370,5 @@ ansible-playbook -i inventory.ini remove-k8s.yml        # remove k8s, containerd
 ├── deploy-graphrag.yml      # Ansible: build images + helm install
 ├── remove-graphrag.yml      # Ansible: teardown pipeline
 ├── remove-k8s.yml           # Ansible: teardown k8s
-└── archive/                 # Benchmark scripts, optional KServe chart
+└── static/                 # Logo, misc_docs (benchmarks, test plans, evaluation results)
 ```

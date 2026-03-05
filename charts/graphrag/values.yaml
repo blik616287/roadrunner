@@ -1,12 +1,16 @@
 namespace: graphrag
 
-# -- Embedding model served by Ollama
+# -- Embedding model served by vLLM (pooling runner, continuous batching)
 embedding:
   enabled: true
-  mode: "dedicated"    # "dedicated" (ollama-embed) or "unified" (use vllm-extract for embedding)
-  image: ollama/ollama:latest
-  model: "qwen3-embedding:0.6b"
-  port: 11434
+  mode: "dedicated"    # "dedicated" (vllm-embed) or "unified" (use vllm-extract for embedding)
+  image: vllm/vllm-openai:nightly-aarch64
+  model: "Qwen/Qwen3-Embedding-0.6B"
+  port: 8000
+  pvc: vllm-embed-data
+  maxModelLen: "8192"
+  gpuMemoryUtilization: "0.15"
+
   persistence:
     storageClass: longhorn-models
     size: 5Gi
@@ -19,19 +23,24 @@ embedding:
       memory: 8Gi
       nvidia.com/gpu: "1"
 
-# -- Extraction LLM served by vLLM (FP8, continuous batching)
+# -- Extraction LLM served by vLLM (Q4_K_M GGUF, continuous batching)
 extraction:
   enabled: true
   image: vllm/vllm-openai:nightly-aarch64
-  model: "Qwen/Qwen3-8B"
-  servedModelName: "qwen3-8b-extract"
+  model: "Qwen3-30B-A3B-Instruct-2507"
+  modelPath: "/data/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
+  tokenizer: "/data/tokenizer"
+  dtype: "half"
+  servedModelName: "qwen3-30b-a3b-extract"
+  pvc: "model-qwen3-30b-a3b"
   port: 8000
   maxModelLen: "8192"
-  maxNumSeqs: "32"
-  gpuMemoryUtilization: "0.80"
+  maxNumSeqs: "8"
+  gpuMemoryUtilization: "0.30"
+
   persistence:
     storageClass: longhorn-models
-    size: 20Gi
+    size: 25Gi
   resources:
     requests:
       cpu: "2"
@@ -68,21 +77,34 @@ lightrag:
   # LLM for entity extraction -- points to vllm-extract (OpenAI-compatible)
   llm:
     binding: openai
-    model: "qwen3-8b-extract"
+    model: "qwen3-30b-a3b-extract"
     host: "http://vllm-extract:8000/v1"
     numCtx: "8192"
-  # Embedding -- points to ollama-embed
+  # Embedding -- points to vllm-embed (pooling runner)
   embeddingConfig:
-    binding: ollama
-    model: "qwen3-embedding:0.6b"
+    binding: openai
+    model: "Qwen/Qwen3-Embedding-0.6B"
     dim: "1024"
-    host: "http://ollama-embed:11434"
+    host: "http://vllm-embed:8000/v1"
   # Reranker -- points to vllm-rerank
   rerank:
     enabled: true
     binding: cohere
     model: "BAAI/bge-reranker-v2-m3"
     host: "http://vllm-rerank:8000/rerank"
+  llmTimeout: "600"            # LLM worker timeout in seconds (default 180, increase for larger models)
+  maxAsync: "8"                 # concurrent document processing (default 8)
+  maxParallelInsert: "4"        # concurrent database inserts (default 4)
+  # Embedding throughput tuning
+  embeddingBatchNum: "32"      # chunks per embedding call (default 10)
+  embeddingFuncMaxAsync: "4"   # concurrent embedding calls (default 8)
+  embeddingTimeout: "60"       # embedding timeout in seconds (default 30)
+  # Pipelined embedding + extraction (workspace_patch.py)
+  pipelinedEmbedding: "1"     # 1=overlap embedding with extraction, 0=sequential
+  # Extraction optimization patches (workspace_patch.py)
+  codeExtractionPrompt: "1"    # 1=code-focused prompt+entity types, 0=default generic
+  llmMaxTokens: "2048"         # max_tokens cap for LLM extraction calls (0=unlimited)
+  typedRelationships: "1"      # 1=use extraction keywords as Neo4j relationship types, 0=all DIRECTED
   # Storage backends
   storage:
     graph: Neo4JStorage
@@ -154,11 +176,11 @@ codePreprocessor:
   replicas: 2
   resources:
     requests:
-      cpu: "0.5"
-      memory: 256Mi
+      cpu: "1"
+      memory: 512Mi
     limits:
-      cpu: "2"
-      memory: 1Gi
+      cpu: "4"
+      memory: 4Gi
 
 # -- Redis (working memory for orchestrator)
 redis:
@@ -220,7 +242,7 @@ nats:
 ingestWorker:
   enabled: true
   image: localhost/graphrag-ingest-worker:latest
-  replicas: 4
+  replicas: 2
   maxRedeliveries: "3"
   ackWaitSeconds: "600"
   batchSize: "20"

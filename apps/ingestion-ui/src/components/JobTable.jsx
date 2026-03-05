@@ -20,7 +20,7 @@ function formatTime(iso) {
   return new Date(iso).toLocaleString();
 }
 
-export default function JobTable({ jobs }) {
+export default function JobTable({ jobs, onRetry }) {
   const [expanded, setExpanded] = useState(null);
 
   if (!jobs.length) {
@@ -62,7 +62,19 @@ export default function JobTable({ jobs }) {
                       <p><span className="text-gray-500">Job ID:</span> {j.job_id}</p>
                       <p><span className="text-gray-500">Doc ID:</span> {j.doc_id}</p>
                       <p><span className="text-gray-500">Attempts:</span> {j.attempts}</p>
-                      {j.error && <p className="text-red-600"><span className="text-gray-500">Error:</span> {j.error}</p>}
+                      {j.error && (
+                        <div className="flex items-start gap-2">
+                          <p className="text-red-600"><span className="text-gray-500">Error:</span> {j.error}</p>
+                          {onRetry && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onRetry(j.job_id); }}
+                              className="px-2 py-0.5 rounded text-xs bg-orange-600 text-white hover:bg-orange-700 shrink-0"
+                            >
+                              Retry
+                            </button>
+                          )}
+                        </div>
+                      )}
                       {j.result?.files?.length > 0 && (
                         <div>
                           <span className="text-gray-500">Files ({j.result.files.length}):</span>

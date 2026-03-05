@@ -5,6 +5,8 @@
   vars:
     local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
     kubeconfig: "/home/{{ local_user }}/.kube/config"
+    download_test_models: "{{ download_test_models | default(false) | bool }}"
+    all_models: "{{ (models.values() | list) + ((test_models | default({}) | dict2items | map(attribute='value') | list) if download_test_models else []) }}"
 
   environment:
     KUBECONFIG: "{{ kubeconfig }}"
@@ -15,13 +17,16 @@
       become: true
       become_user: "{{ local_user }}"
       shell: kubectl create namespace {{ item }} --dry-run=client -o yaml | kubectl apply -f -
-      loop: "{{ models.values() | map(attribute='namespace') | unique | list }}"
+      loop: "{{ all_models | map(attribute='namespace') | unique | list }}"
 
-    - name: Create model PVCs
+    - name: Create model PVCs (skip existing)
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        cat <<'EOF' | kubectl apply -f -
+        if kubectl -n {{ item.namespace }} get pvc {{ item.pvc }} >/dev/null 2>&1; then
+          echo "PVC {{ item.pvc }} already exists, skipping"
+        else
+          cat <<'EOF' | kubectl apply -f -
         apiVersion: v1
         kind: PersistentVolumeClaim
         metadata:
@@ -39,25 +44,26 @@
             requests:
               storage: {{ item.size }}
         EOF
-      loop: "{{ models.values() | list }}"
+        fi
+      loop: "{{ all_models }}"
 
     - name: Wait for PVCs to be bound
       become: true
       become_user: "{{ local_user }}"
       shell: kubectl -n {{ item.namespace }} wait --for=jsonpath='{.status.phase}'=Bound pvc/{{ item.pvc }} --timeout=120s
-      loop: "{{ models.values() | list }}"
+      loop: "{{ all_models }}"
 
     # ── Clean up stale pods from previous runs ────────────────────
     - name: Delete stale check/verify/pull pods
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        for prefix in check check-hf verify verify-hf ollama-pull hf-pull; do
+        for prefix in check check-hf check-gguf verify verify-hf verify-gguf ollama-pull hf-pull gguf-pull; do
           kubectl get pods -n {{ item }} --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null \
             | grep "^${prefix}-" \
             | xargs -r kubectl delete pod -n {{ item }} --force --grace-period=0 2>/dev/null || true
         done
-      loop: "{{ models.values() | map(attribute='namespace') | unique | list }}"
+      loop: "{{ all_models | map(attribute='namespace') | unique | list }}"
       changed_when: false
       failed_when: false
 
@@ -72,7 +78,7 @@
             -n {{ item.namespace }}
             --image=busybox:latest
             --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"check","image":"busybox:latest","command":["sh","-c","if find /data/manifests -type f 2>/dev/null | grep -q .; then partials=$(find /data/blobs -name *-partial* 2>/dev/null | wc -l); if [ $partials -gt 0 ]; then echo incomplete; else echo ok; fi; else echo missing; fi"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-          loop: "{{ models.values() | selectattr('source', 'equalto', 'ollama') | list }}"
+          loop: "{{ all_models | selectattr('source', 'equalto', 'ollama') | list }}"
           register: ollama_check
           changed_when: false
           timeout: 120
@@ -99,7 +105,7 @@
             -n {{ item.namespace }}
             --image=busybox:latest
             --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"verify","image":"busybox:latest","command":["sh","-c","manifest=$(find /data/manifests -type f 2>/dev/null | head -1); if [ -z \"$manifest\" ]; then echo SKIP; exit 0; fi; failed=0; for digest in $(grep -oE sha256:[a-f0-9]+ \"$manifest\"); do blob=/data/blobs/$(echo $digest | tr : -); expected=$(echo $digest | cut -d: -f2); if [ ! -f \"$blob\" ]; then echo FAIL:missing:$digest; failed=1; continue; fi; actual=$(sha256sum \"$blob\" | cut -d\" \" -f1); size=$(du -h \"$blob\" | cut -f1); if [ \"$actual\" = \"$expected\" ]; then echo PASS:$size:$digest; else echo FAIL:$size:$digest; failed=1; fi; done; exit $failed"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-          loop: "{{ models.values() | selectattr('source', 'equalto', 'ollama') | list }}"
+          loop: "{{ all_models | selectattr('source', 'equalto', 'ollama') | list }}"
           register: ollama_verify
           timeout: 600
 
@@ -123,7 +129,7 @@
             -n {{ item.namespace }}
             --image=busybox:latest
             --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"check","image":"busybox:latest","command":["sh","-c","if [ -f /data/config.json ]; then incomplete=$(find /data -name *.incomplete 2>/dev/null | wc -l); if [ $incomplete -gt 0 ]; then echo incomplete; else echo ok; fi; else echo missing; fi"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-          loop: "{{ models.values() | selectattr('source', 'equalto', 'huggingface') | list }}"
+          loop: "{{ all_models | selectattr('source', 'equalto', 'huggingface') | list }}"
           register: hf_check
           changed_when: false
           timeout: 120
@@ -135,12 +141,12 @@
             kubectl run hf-pull-{{ item.item.name }} --rm -i --restart=Never
             -n {{ item.item.namespace }}
             --image=python:3.12-slim
-            --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.item.pvc }}"}}],"containers":[{"name":"pull","image":"python:3.12-slim","command":["sh","-c","pip install -q huggingface_hub hf_transfer && HF_HUB_ENABLE_HF_TRANSFER=1 python3 -c \"from huggingface_hub import snapshot_download; snapshot_download('"'"'{{ item.item.tag }}'"'"', local_dir='"'"'/data'"'"'); print('"'"'HF_PULL_COMPLETE'"'"')\""],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
+            --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.item.pvc }}"}}],"containers":[{"name":"pull","image":"python:3.12-slim","env":[{"name":"HF_TOKEN","value":"{{ hf_token }}"}],"command":["sh","-c","pip install -q huggingface_hub hf_transfer && HF_HUB_ENABLE_HF_TRANSFER=1 python3 -c \"from huggingface_hub import snapshot_download; snapshot_download('"'"'{{ item.item.tag }}'"'"', local_dir='"'"'/data'"'"'); print('"'"'HF_PULL_COMPLETE'"'"')\""],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
           loop: "{{ hf_check.results }}"
           when: item.stdout is not defined or item.stdout.strip() != "ok"
           register: hf_pull
           changed_when: hf_pull.stdout is defined and 'HF_PULL_COMPLETE' in hf_pull.stdout
-          timeout: 1800
+          timeout: 3600
 
         - name: Verify HuggingFace model integrity
           become: true
@@ -150,7 +156,7 @@
             -n {{ item.namespace }}
             --image=busybox:latest
             --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"verify","image":"busybox:latest","command":["sh","-c","if [ ! -f /data/config.json ]; then echo SKIP; exit 0; fi; incomplete=$(find /data -name *.incomplete 2>/dev/null | wc -l); if [ $incomplete -gt 0 ]; then echo FAIL:incomplete; exit 1; fi; for sf in /data/*.safetensors; do [ -f \"$sf\" ] || continue; size=$(du -h \"$sf\" | cut -f1); hash=$(sha256sum \"$sf\" | cut -d\" \" -f1); echo PASS:$size:$(basename $sf):sha256:$hash; done; echo ok"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-          loop: "{{ models.values() | selectattr('source', 'equalto', 'huggingface') | list }}"
+          loop: "{{ all_models | selectattr('source', 'equalto', 'huggingface') | list }}"
           register: hf_verify
           timeout: 600
 
@@ -163,13 +169,64 @@
           debug:
             msg: "WARNING: HuggingFace model download or verification failed. Check errors above."
 
+    # ── GGUF models (check → pull GGUF + tokenizer → verify) ──
+    - name: Download and verify GGUF models
+      block:
+        - name: Check GGUF model files in PVCs
+          become: true
+          become_user: "{{ local_user }}"
+          command: >
+            kubectl run check-gguf-{{ item.name }} --rm -i --restart=Never
+            -n {{ item.namespace }}
+            --image=busybox:latest
+            --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"check","image":"busybox:latest","command":["sh","-c","if [ -f /data/{{ item.gguf_file }} ] && [ -d /data/tokenizer ]; then echo ok; else echo missing; fi"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
+          loop: "{{ all_models | selectattr('source', 'equalto', 'gguf') | list }}"
+          register: gguf_check
+          changed_when: false
+          timeout: 120
+
+        - name: Download missing GGUF models + tokenizers
+          become: true
+          become_user: "{{ local_user }}"
+          command: >
+            kubectl run gguf-pull-{{ item.item.name }} --rm -i --restart=Never
+            -n {{ item.item.namespace }}
+            --image=python:3.12-slim
+            --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.item.pvc }}"}}],"containers":[{"name":"pull","image":"python:3.12-slim","env":[{"name":"HF_TOKEN","value":"{{ hf_token }}"}],"command":["sh","-c","pip install -q huggingface_hub hf_transfer && HF_HUB_ENABLE_HF_TRANSFER=1 python3 -c \"import os; os.environ['"'"'HF_HUB_ENABLE_HF_TRANSFER'"'"']= '"'"'1'"'"'; from huggingface_hub import hf_hub_download, snapshot_download; hf_hub_download('"'"'{{ item.item.gguf_repo }}'"'"', '"'"'{{ item.item.gguf_file }}'"'"', local_dir='"'"'/data'"'"'); snapshot_download('"'"'{{ item.item.tokenizer }}'"'"', local_dir='"'"'/data/tokenizer'"'"', allow_patterns=['"'"'tokenizer*'"'"', '"'"'special_tokens*'"'"', '"'"'config.json'"'"', '"'"'generation_config*'"'"', '"'"'vocab*'"'"', '"'"'merges*'"'"']); print('"'"'GGUF_PULL_COMPLETE'"'"')\""],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
+          loop: "{{ gguf_check.results }}"
+          when: item.stdout is not defined or item.stdout.strip() != "ok"
+          register: gguf_pull
+          changed_when: gguf_pull.stdout is defined and 'GGUF_PULL_COMPLETE' in gguf_pull.stdout
+          timeout: 3600
+
+        - name: Verify GGUF model integrity
+          become: true
+          become_user: "{{ local_user }}"
+          command: >
+            kubectl run verify-gguf-{{ item.name }} --rm -i --restart=Never
+            -n {{ item.namespace }}
+            --image=busybox:latest
+            --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"verify","image":"busybox:latest","command":["sh","-c","gguf=/data/{{ item.gguf_file }}; if [ ! -f \"$gguf\" ]; then echo FAIL:missing_gguf; exit 1; fi; size=$(du -h \"$gguf\" | cut -f1); echo PASS:$size:{{ item.gguf_file }}; if [ -f /data/tokenizer/tokenizer.json ] || [ -f /data/tokenizer/tokenizer.model ]; then echo PASS:tokenizer; else echo FAIL:missing_tokenizer; exit 1; fi; echo ok"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
+          loop: "{{ all_models | selectattr('source', 'equalto', 'gguf') | list }}"
+          register: gguf_verify
+          timeout: 600
+
+        - name: Show GGUF verification results
+          debug:
+            msg: "{{ item.item.name }}: {{ item.stdout }}"
+          loop: "{{ gguf_verify.results }}"
+      rescue:
+        - name: GGUF download/verify failed
+          debug:
+            msg: "WARNING: GGUF model download or verification failed. Check errors above."
+
     # ── Summary ──────────────────────────────────────────────────
     - name: Show PVC status
       become: true
       become_user: "{{ local_user }}"
       shell: |
         echo "=== Model PVCs ==="
-        {% for ns in models.values() | map(attribute='namespace') | unique %}
+        {% for ns in all_models | map(attribute='namespace') | unique %}
         echo "--- {{ ns }} ---"
         kubectl get pvc -n {{ ns }} --no-headers 2>/dev/null || echo "  (none)"
         echo ""

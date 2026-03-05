@@ -28,7 +28,18 @@ spec:
         - name: vllm
           image: {{ .Values.extraction.image }}
           args:
-            - /data
+            {{- if .Values.extraction.command }}
+            - {{ .Values.extraction.command }}
+            {{- end }}
+            - {{ .Values.extraction.modelPath | default "/data" }}
+            {{- if .Values.extraction.tokenizer }}
+            - --tokenizer
+            - {{ .Values.extraction.tokenizer }}
+            {{- end }}
+            {{- if .Values.extraction.dtype }}
+            - --dtype
+            - {{ .Values.extraction.dtype }}
+            {{- end }}
             - --host
             - "0.0.0.0"
             - --port
@@ -50,6 +61,14 @@ spec:
               value: "/run/nvidia/mps/nvidia.com/gpu/pipe"
             - name: CUDA_MPS_LOG_DIRECTORY
               value: "/run/nvidia/mps/nvidia.com/gpu/log"
+            {{- if .Values.extraction.mpsThreadPercent }}
+            - name: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE
+              value: {{ .Values.extraction.mpsThreadPercent | quote }}
+            {{- end }}
+            {{- range .Values.extraction.extraEnv }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
           ports:
             - containerPort: {{ .Values.extraction.port }}
               name: http
@@ -70,7 +89,7 @@ spec:
             httpGet:
               path: /health
               port: {{ .Values.extraction.port }}
-            failureThreshold: 60
+            failureThreshold: {{ .Values.extraction.startupProbeFailureThreshold | default 60 }}
             periodSeconds: 10
           readinessProbe:
             httpGet:
@@ -81,7 +100,7 @@ spec:
       volumes:
         - name: model-data
           persistentVolumeClaim:
-            claimName: vllm-extract-data
+            claimName: {{ .Values.extraction.pvc | default "vllm-extract-data" }}
         - name: mps-root
           hostPath:
             path: /run/nvidia/mps

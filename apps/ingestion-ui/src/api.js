@@ -30,6 +30,12 @@ export const listJobs = (workspace, status, limit = 50) => {
 
 export const getJob = (jobId) => request(`${API}/v1/jobs/${jobId}`);
 
+export const retryJob = (jobId) =>
+  request(`${API}/v1/jobs/${jobId}/retry`, { method: 'POST' });
+
+export const retryFailedJobs = (workspace) =>
+  request(`${API}/v1/jobs/retry-failed?workspace=${encodeURIComponent(workspace)}`, { method: 'POST' });
+
 // Documents
 export const ingestDocument = (file, workspace, fileName) => {
   const form = new FormData();

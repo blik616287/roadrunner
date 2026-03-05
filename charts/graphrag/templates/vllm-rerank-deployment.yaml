@@ -43,6 +43,10 @@ spec:
               value: "/run/nvidia/mps/nvidia.com/gpu/pipe"
             - name: CUDA_MPS_LOG_DIRECTORY
               value: "/run/nvidia/mps/nvidia.com/gpu/log"
+            {{- if .Values.reranker.mpsThreadPercent }}
+            - name: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE
+              value: {{ .Values.reranker.mpsThreadPercent | quote }}
+            {{- end }}
           ports:
             - containerPort: {{ .Values.reranker.port }}
               name: http

@@ -2,21 +2,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ollama-embed
+  name: vllm-embed
   namespace: {{ .Values.namespace }}
   labels:
-    app: ollama-embed
+    app: vllm-embed
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: ollama-embed
+      app: vllm-embed
   template:
     metadata:
       labels:
-        app: ollama-embed
+        app: vllm-embed
     spec:
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -25,42 +25,82 @@ spec:
       enableServiceLinks: false
       runtimeClassName: nvidia
       containers:
-        - name: ollama
+        - name: vllm
           image: {{ .Values.embedding.image }}
+          args:
+            - /data
+            - --runner
+            - pooling
+            - --dtype
+            - half
+            - --host
+            - "0.0.0.0"
+            - --port
+            - {{ .Values.embedding.port | quote }}
+            - --max-model-len
+            - {{ .Values.embedding.maxModelLen | default "8192" | quote }}
+            - --gpu-memory-utilization
+            - {{ .Values.embedding.gpuMemoryUtilization | default "0.15" | quote }}
+            - --trust-remote-code
+            - --served-model-name
+            - {{ .Values.embedding.model }}
+          env:
+            - name: CUDA_MPS_PIPE_DIRECTORY
+              value: "/run/nvidia/mps/nvidia.com/gpu/pipe"
+            - name: CUDA_MPS_LOG_DIRECTORY
+              value: "/run/nvidia/mps/nvidia.com/gpu/log"
+            {{- if .Values.embedding.mpsThreadPercent }}
+            - name: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE
+              value: {{ .Values.embedding.mpsThreadPercent | quote }}
+            {{- end }}
           ports:
             - containerPort: {{ .Values.embedding.port }}
               name: http
-          env:
-            - name: OLLAMA_HOST
-              value: "0.0.0.0:{{ .Values.embedding.port }}"
-            - name: OLLAMA_MODELS
-              value: /root/.ollama
-            - name: OLLAMA_KEEP_ALIVE
-              value: "5m"
-            - name: OLLAMA_FLASH_ATTENTION
-              value: "1"
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - /bin/sh
-                  - -c
-                  - |
-                    until ollama list >/dev/null 2>&1; do sleep 1; done
-                    ollama show {{ .Values.embedding.model }} >/dev/null 2>&1 || ollama pull {{ .Values.embedding.model }}
           resources:
             {{- toYaml .Values.embedding.resources | nindent 12 }}
           volumeMounts:
-            - name: ollama-data
-              mountPath: /root/.ollama
+            - name: model-data
+              mountPath: /data
+              readOnly: true
+            - name: mps-root
+              mountPath: /run/nvidia/mps
+            - name: mps-shm
+              mountPath: /dev/shm
+          startupProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.embedding.port }}
+            failureThreshold: 60
+            periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /api/tags
+              path: /health
               port: {{ .Values.embedding.port }}
-            initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 5
       volumes:
-        - name: ollama-data
+        - name: model-data
           persistentVolumeClaim:
-            claimName: ollama-embed-data
+            claimName: {{ .Values.embedding.pvc | default "vllm-embed-data" }}
+        - name: mps-root
+          hostPath:
+            path: /run/nvidia/mps
+            type: Directory
+        - name: mps-shm
+          hostPath:
+            path: /run/nvidia/mps/shm
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-embed
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: vllm-embed
+  ports:
+    - port: {{ .Values.embedding.port }}
+      targetPort: {{ .Values.embedding.port }}
+      name: http
 {{- end }}
