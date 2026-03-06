@@ -33,6 +33,7 @@ graph TD
 
     subgraph gpu ["GPU Layer - MPS"]
         VE["vLLM-extract Qwen3-30B-A3B"]
+        VQ["vLLM-query Qwen3-30B-A3B"]
         VR["vLLM-rerank bge-reranker-v2-m3"]
         OE["vLLM-embed qwen3-embedding"]
     end
@@ -42,6 +43,7 @@ graph TD
     LR --> VE
     LR --> VR
     LR --> OE
+    API --> VQ
     API --> RD
     IW --> PG
 ```
@@ -79,7 +81,7 @@ Interactive force-directed knowledge graph visualization. Nodes are **color-code
 
 ### Query
 
-Five query modes in one interface: **vector search** (naive), **vector + graph** (mix), **graph local** (subgraph around matched entities), **graph global** (full traversal), and **graph hybrid**. Results are organized into collapsible sections for chunks (with expandable 300-char previews), entities, and relationships. Hit **Explain** to get a natural-language LLM summary of the results.
+Five query modes in one interface: **vector search** (naive), **vector + graph** (mix), **graph local** (subgraph around matched entities), **graph global** (full traversal), and **graph hybrid**. Results are organized into collapsible sections for chunks (with expandable 300-char previews), entities, and relationships. Hit **Explain** to get a natural-language LLM summary via the dedicated vllm-query instance.
 
 ---
 
@@ -87,9 +89,15 @@ Five query modes in one interface: **vector search** (naive), **vector + graph**
 
 | Category | Extensions |
 |---|---|
-| **Code** (tree-sitter) | `.py` `.js` `.jsx` `.ts` `.tsx` `.go` `.rs` `.java` `.c` `.h` `.cpp` `.cc` `.cxx` `.hpp` |
+| **Code** (tree-sitter) | `.py` `.js` `.jsx` `.mjs` `.cjs` `.ts` `.tsx` `.go` `.rs` `.java` `.c` `.h` `.cpp` `.cc` `.cxx` `.hpp` `.hh` `.hxx` |
 | **Documents** | `.pdf` `.md` `.txt` `.rst` `.html` `.htm` |
+| **YAML** | `.yaml` `.yml` |
+| **Config** | `.ini` `.toml` `.cfg` `.conf` `.env` `.properties` |
+| **JSON** | `.json` `.jsonl` `.jsonc` |
+| **Shell** | `.sh` `.bash` `.zsh` `.fish` |
 | **Archives** (codebase ingest) | `.tar.gz` `.zip` `.tar.bz2` |
+
+Code files get tree-sitter parsing into natural-language Markdown. YAML, config, JSON, and shell files are ingested with filetype-specific extraction prompts tuned for their structure. Documents are passed through directly (PDFs are split into 50-page chunks).
 
 ## Prerequisites
 
@@ -106,7 +114,7 @@ Five query modes in one interface: **vector search** (naive), **vector + graph**
 ansible-playbook -i inventory.ini install-k8s.yml
 ```
 
-This sets up k8s 1.34, containerd, Helm, NVIDIA MPS (3 GPU slices), and Longhorn storage.
+This sets up k8s 1.34, containerd, Helm, NVIDIA MPS (4 GPU slices), and Longhorn storage.
 
 **2. Download models:**
 
@@ -166,12 +174,17 @@ curl -X POST http://localhost:31800/v1/data/query \
 | `POST` | `/v1/codebase/ingest` | Upload a `.tar.gz` / `.zip` archive. Filters out dotfiles, `node_modules`, binaries; max 2000 files. |
 | `GET`  | `/v1/jobs/{job_id}` | Poll ingestion job status. |
 | `GET`  | `/v1/jobs?workspace=X&status=Y` | List jobs, optionally filtered. |
+| `POST` | `/v1/jobs/{job_id}/retry` | Retry a single failed job. |
+| `POST` | `/v1/jobs/retry-failed?workspace=X` | Retry all failed jobs in a workspace. |
 
 ### Query
 
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/v1/data/query` | Query the knowledge graph. Returns entities, relations, and source chunks. Returns 503 during burst ingestion mode. |
+| `POST` | `/v1/data/explain` | Query the graph then synthesize a natural-language answer via vllm-query. Falls back to raw context on LLM failure. |
+| `POST` | `/v1/data/reconcile` | Find disconnected graph clusters and create BRIDGE_TO edges to the main component using pgvector similarity. |
+| `GET`  | `/v1/data/weights?workspace=X` | Return blended weights (chunk count + degree) for entities and geometric-mean weights for relations. |
 
 **Request body:**
 
@@ -204,6 +217,8 @@ curl -X POST http://localhost:31800/v1/data/query \
 }
 ```
 
+**Note:** The `/v1/chat/completions` endpoint has been removed and returns `410 Gone`. Use `/v1/data/query` for graph queries and `/v1/data/explain` for LLM-synthesized answers.
+
 ### Workspace Management
 
 | Method | Endpoint | Description |
@@ -216,7 +231,20 @@ curl -X POST http://localhost:31800/v1/data/query \
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/v1/documents/{doc_id}/download` | Download the original file. |
-| `DELETE` | `/v1/documents/{doc_id}` | Delete a document and its graph entries. |
+| `DELETE` | `/v1/documents/{doc_id}` | Delete a document and its graph entries (cascades to LightRAG). |
+
+### Sessions
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/v1/sessions?workspace=X` | List sessions, optionally filtered by workspace. |
+| `DELETE` | `/v1/sessions/{session_id}` | Delete a session (working memory + recall memory). |
+
+### Internal
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/internal/query-activity` | Check query activity status (used by queue-scaler for burst mode coordination). |
 
 ## Multi-Tenancy
 
@@ -256,9 +284,11 @@ sequenceDiagram
         CP->>CP: tree-sitter to Markdown
     else PDF files
         CP->>CP: pdfplumber to 50-page chunks
-    else Text or Markdown
+    else Text / Markdown / YAML / Config / JSON / Shell
         CP->>CP: Pass through
     end
+
+    Note over CP: Tag with filetype marker
 
     CP->>LR: POST /documents/text
     LR->>GPU: Embed via vLLM 1024-dim
@@ -275,8 +305,8 @@ sequenceDiagram
 
 1. **Orchestrator** receives the upload, gzip-compresses the blob into PostgreSQL, creates a job record, and publishes a NATS JetStream message.
 2. **Ingest workers** (4 replicas) pull from NATS, fetch the blob, decompress, and split files. Codebases are extracted from archives with filtering (skip dotfiles, `node_modules`, `__pycache__`, binaries; 1 MB/file limit; 2000 file cap).
-3. **Code preprocessor** (2 replicas) parses code files via tree-sitter into natural-language Markdown descriptions. PDFs are split into 50-page chunks via pdfplumber. Text/Markdown pass through directly.
-4. **LightRAG** receives the processed text, embeds it via vLLM (Qwen3-Embedding-0.6B, 1024-dim), extracts entities and relations via vLLM (Qwen3-30B-A3B Q4_K_M), and stores everything in pgvector + Neo4j.
+3. **Code preprocessor** (2 replicas) parses code files via tree-sitter into natural-language Markdown descriptions. PDFs are split into 50-page chunks via pdfplumber. All files are tagged with a `<!-- filetype:xxx -->` marker (code, yaml, config, json, bash, or text) before forwarding.
+4. **LightRAG** receives the processed text, embeds it via vLLM (Qwen3-Embedding-0.6B, 1024-dim), and extracts entities and relations via vLLM (Qwen3-30B-A3B Q4_K_M) using filetype-specific prompts, examples, and entity types. Results are stored in pgvector + Neo4j.
 5. **Ingest worker** polls LightRAG's `/documents/pipeline_status` until indexing completes, then marks the job done.
 
 ### Burst Mode
@@ -304,13 +334,14 @@ stateDiagram-v2
 
 ### GPU Memory Layout
 
-Three MPS slices share the GB10's unified 128 GB memory:
+Four MPS slices share the GB10's unified 128 GB memory. vLLM instances are started sequentially during deployment — largest allocation first — to avoid memory races on the unified pool.
 
-| Slice | Model | Purpose |
-|---|---|---|
-| vLLM-extract | Qwen3-30B-A3B (Q4_K_M GGUF, ~17 GB) | Entity/relation extraction |
-| vLLM-rerank | bge-reranker-v2-m3 | Query result reranking |
-| vLLM-embed | Qwen3-Embedding-0.6B | 1024-dim document embedding |
+| Slice | Model | gpu-memory-utilization | Purpose |
+|---|---|---|---|
+| vLLM-extract | Qwen3-30B-A3B (Q4_K_M GGUF) | 0.35 | Entity/relation extraction |
+| vLLM-query | Qwen3-30B-A3B (Q4_K_M GGUF) | 0.17 | Explain / synthesis for queries |
+| vLLM-rerank | bge-reranker-v2-m3 | — | Query result reranking |
+| vLLM-embed | Qwen3-Embedding-0.6B | 0.03 | 1024-dim document embedding |
 
 ### Storage
 
@@ -328,11 +359,18 @@ All model and pipeline settings live in `group_vars/k8s.yml`. To swap a model, c
 ```yaml
 models:
   extract:
-    tag: "Qwen/Qwen3-30B-A3B"    # HuggingFace model for entity extraction (GGUF Q4_K_M)
+    tag: "Qwen/Qwen3-30B-A3B"
+    source: gguf                          # downloads GGUF quant + tokenizer
+    gguf_repo: "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF"
+    gguf_file: "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
+    served_model_name: "qwen3-30b-a3b-extract"
+    num_ctx: "8192"
   embed:
-    tag: "Qwen/Qwen3-Embedding-0.6B"  # vLLM pooling model for embeddings
+    tag: "Qwen/Qwen3-Embedding-0.6B"     # vLLM pooling model for embeddings
+    source: huggingface
   reranker:
-    tag: "BAAI/bge-reranker-v2-m3"  # HuggingFace model for reranking
+    tag: "BAAI/bge-reranker-v2-m3"       # HuggingFace model for reranking
+    source: huggingface
 
 graphrag:
   ingest_worker_replicas: 4
@@ -343,6 +381,8 @@ graphrag:
     burst_hysteresis_up: 3  # consecutive polls before entering burst
     burst_hysteresis_down: 5  # consecutive polls before exiting burst
 ```
+
+Additional test models for benchmarking are defined under `test_models:` in the same file. Download them with `-e download_test_models=true`.
 
 Helm values are in `charts/graphrag/values.yaml` for fine-grained resource limits, storage sizes, and JVM tuning.
 
