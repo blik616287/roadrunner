@@ -5,8 +5,8 @@
   vars:
     local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
     kubeconfig: "/home/{{ local_user }}/.kube/config"
-    download_test_models: "{{ download_test_models | default(false) | bool }}"
-    all_models: "{{ (models.values() | list) + ((test_models | default({}) | dict2items | map(attribute='value') | list) if download_test_models else []) }}"
+    _download_test_models: "{{ download_test_models | default(false) | bool }}"
+    all_models: "{{ (models.values() | list) + ((test_models | default({}) | dict2items | map(attribute='value') | list) if _download_test_models else []) }}"
 
   environment:
     KUBECONFIG: "{{ kubeconfig }}"

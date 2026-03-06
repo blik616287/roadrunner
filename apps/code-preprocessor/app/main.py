@@ -26,6 +26,26 @@ CODE_EXTENSIONS = {
 # File extensions forwarded directly to LightRAG
 DOC_EXTENSIONS = {".pdf", ".md", ".txt", ".rst", ".html", ".htm"}
 
+YAML_EXTENSIONS = {".yaml", ".yml"}
+CONFIG_EXTENSIONS = {".ini", ".toml", ".cfg", ".conf", ".env", ".properties"}
+JSON_EXTENSIONS = {".json", ".jsonl", ".jsonc"}
+BASH_EXTENSIONS = {".sh", ".bash", ".zsh", ".fish"}
+
+
+def classify_filetype(ext: str) -> str:
+    """Return a filetype tag for extraction prompt selection."""
+    if ext in CODE_EXTENSIONS:
+        return "code"
+    if ext in YAML_EXTENSIONS:
+        return "yaml"
+    if ext in CONFIG_EXTENSIONS:
+        return "config"
+    if ext in JSON_EXTENSIONS:
+        return "json"
+    if ext in BASH_EXTENSIONS:
+        return "bash"
+    return "text"
+
 
 @app.get("/health")
 def health():
@@ -70,12 +90,18 @@ async def ingest(
     documents_sent = 0
     track_ids: list[TrackInfo] = []
 
-    async def _send_text(client, text: str, file_source: str):
-        """Send text to LightRAG and capture track_id."""
+    async def _send_text(client, text: str, file_source: str, filetype: str = "text"):
+        """Send text to LightRAG and capture track_id.
+
+        Prepends a <!-- filetype:xxx --> marker so the extraction prompt
+        patch can detect the file type at extraction time (which runs
+        asynchronously, after the HTTP request context is gone).
+        """
         nonlocal documents_sent
+        tagged_text = f"<!-- filetype:{filetype} -->\n{text}"
         resp = await client.post(
             f"{LIGHTRAG_URL}/documents/text",
-            json={"text": text, "file_source": file_source},
+            json={"text": tagged_text, "file_source": file_source},
             headers={"LIGHTRAG-WORKSPACE": x_workspace},
         )
         resp.raise_for_status()
@@ -91,6 +117,8 @@ async def ingest(
             ext = Path(file_path).suffix.lower()
             content = await f.read()
 
+            ft = classify_filetype(ext)
+
             if ext in CODE_EXTENSIONS:
                 try:
                     text = content.decode("utf-8", errors="replace")
@@ -99,7 +127,7 @@ async def ingest(
                         errors.append(f"{file_path}: unsupported language")
                         continue
                     result = parse_file(file_path, text, language)
-                    await _send_text(client, result.document, file_path)
+                    await _send_text(client, result.document, file_path, ft)
                 except Exception as e:
                     errors.append(f"{file_path}: {e}")
 
@@ -115,10 +143,10 @@ async def ingest(
                             page_start = ci * pages_per_chunk + 1
                             page_end = (ci + 1) * pages_per_chunk
                             label = f"{file_path} (pages {page_start}-{page_end})"
-                            await _send_text(client, f"# {label}\n\n{chunk}", file_path)
+                            await _send_text(client, f"# {label}\n\n{chunk}", file_path, ft)
                     else:
                         text = content.decode("utf-8", errors="replace")
-                        await _send_text(client, text, file_path)
+                        await _send_text(client, text, file_path, ft)
                 except Exception as e:
                     errors.append(f"{file_path}: {e}")
 
@@ -140,7 +168,7 @@ async def ingest(
                         }.get(block.language, "")
                         synthetic_name = f"{file_path}:block_{block.index}{lang_ext}"
                         result = parse_file(synthetic_name, block.code, block.language)
-                        await _send_text(client, result.document, synthetic_name)
+                        await _send_text(client, result.document, synthetic_name, "code")
                         logger.info(
                             f"Extracted code block {block.index} ({block.language}) "
                             f"from {file_path}: {len(result.entities)} entities"
@@ -150,7 +178,7 @@ async def ingest(
             else:
                 try:
                     text = content.decode("utf-8", errors="replace")
-                    await _send_text(client, text, file_path)
+                    await _send_text(client, text, file_path, ft)
                 except Exception as e:
                     errors.append(f"{file_path}: {e}")
 

@@ -26,7 +26,7 @@ data:
   EMBED_MODEL: {{ .Values.extraction.servedModelName | quote }}
   EMBED_DIM: "4096"
   {{- else }}
-  EMBED_URL: "http://ollama-embed.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.embedding.port }}"
+  EMBED_URL: "http://vllm-embed.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.embedding.port }}"
   EMBED_MODEL: {{ .Values.embedding.model | quote }}
   EMBED_DIM: {{ .Values.lightrag.embeddingConfig.dim | quote }}
   {{- end }}
@@ -39,6 +39,15 @@ data:
   # Summarizer (uses vllm-extract via OpenAI-compatible API)
   SUMMARIZER_URL: "http://vllm-extract.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.extraction.port }}/v1"
   SUMMARIZER_MODEL: {{ .Values.extraction.servedModelName | quote }}
+  # Query LLM (dedicated vllm-query for explain/synthesis)
+  {{- if .Values.query.enabled }}
+  QUERY_LLM_URL: "http://vllm-query.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.query.port }}/v1"
+  QUERY_LLM_MODEL: {{ .Values.query.servedModelName | quote }}
+  {{- end }}
+  # Neo4j
+  NEO4J_URI: "bolt://neo4j.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.neo4j.boltPort }}"
+  NEO4J_USER: {{ .Values.neo4j.auth.username | quote }}
+  NEO4J_PASSWORD: {{ .Values.neo4j.auth.password | quote }}
   # Memory thresholds
   PROMOTE_AFTER_TURNS: {{ .Values.orchestrator.promoteAfterTurns | default "10" | quote }}
   ARCHIVAL_AFTER_TURNS: {{ .Values.orchestrator.archivalAfterTurns | default "20" | quote }}

@@ -12,6 +12,7 @@ from .services import (
     archival_memory,
     query_tracker,
     nats_client,
+    reconcile,
 )
 from .routes import chat, models_list, documents, sessions, jobs, workspaces, data_query, internal
 
@@ -51,12 +52,14 @@ async def lifespan(app: FastAPI):
     data_query.init_data_query(settings, _http_client)
     documents.init_documents(settings)
     workspaces.init_workspaces(settings)
+    reconcile.init_reconcile(settings, _http_client)
 
     logger.info("GraphRAG Orchestrator ready")
     yield
 
     # Shutdown
     logger.info("Shutting down GraphRAG Orchestrator...")
+    reconcile.close_reconcile()
     await nats_client.close_nats()
     await _http_client.aclose()
     await working_memory.close_redis()

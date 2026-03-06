@@ -108,11 +108,11 @@
           --set extraction.model={{ models.extract.tag }} \
           --set extraction.servedModelName={{ models.extract.served_model_name }} \
           --set extraction.maxModelLen={{ models.extract.num_ctx }} \
-{% if models.extract.source == 'gguf' %}
+          {% if models.extract.source == 'gguf' %}
           --set extraction.modelPath="/data/{{ models.extract.gguf_file }}" \
           --set extraction.tokenizer="/data/tokenizer" \
           --set extraction.dtype="half" \
-{% endif %}
+          {% endif %}
           --set embedding.model={{ models.embed.tag }} \
           --set embedding.mode={{ models.embed.mode | default('dedicated') }} \
           --set lightrag.llm.model={{ models.extract.served_model_name }} \
@@ -126,143 +126,117 @@
           --set queueScaler.burstThreshold={{ graphrag.queue_scaler.burst_threshold }} \
           --set queueScaler.hysteresisUp={{ graphrag.queue_scaler.burst_hysteresis_up }} \
           --set queueScaler.hysteresisDown={{ graphrag.queue_scaler.burst_hysteresis_down }} \
-          --wait --timeout 15m
+          --timeout 15m
       register: chart_install
 
     - name: Show Helm install result
       debug:
         msg: "{{ chart_install.stdout_lines }}"
 
-    # ── Wait for pods ──────────────────────────────────────────────
-    - name: Wait for Neo4j pod to be ready
+    # ── Wait for infrastructure pods (no GPU) ────────────────────
+    - name: Wait for infrastructure pods
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=neo4j --timeout=120s
+        kubectl -n graphrag wait --for=condition=Ready pod -l app={{ item }} --timeout=120s
+      loop:
+        - neo4j
+        - postgresql
+        - redis
+        - nats
       retries: 3
       delay: 10
-      register: neo4j_ready
-      until: neo4j_ready.rc == 0
+      register: infra_ready
+      until: infra_ready.rc == 0
 
-    - name: Wait for PostgreSQL pod to be ready
+    # ── Sequential vLLM startup (largest first to stabilize memory) ──
+    #
+    # On unified memory (GB10), all vLLM instances pre-allocate from the
+    # same 119 GiB pool. Starting them simultaneously causes race conditions
+    # where smaller models see negative available KV cache and crash.
+    # Solution: start the largest consumer first, wait for it to settle,
+    # then proceed to the next.
+
+    - name: Scale down all vLLM deployments
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=postgresql --timeout=120s
-      retries: 3
-      delay: 10
-      register: pg_ready
-      until: pg_ready.rc == 0
+        kubectl -n graphrag scale deploy/vllm-extract --replicas=0 2>/dev/null || true
+        kubectl -n graphrag scale deploy/vllm-query --replicas=0 2>/dev/null || true
+        kubectl -n graphrag scale deploy/vllm-embed --replicas=0 2>/dev/null || true
+        kubectl -n graphrag scale deploy/vllm-rerank --replicas=0 2>/dev/null || true
+        sleep 5
 
-    - name: Verify embedding model is loaded
+    - name: "Start vllm-extract (largest allocation, start first)"
       become: true
       become_user: "{{ local_user }}"
-      shell: |
-        kubectl -n graphrag exec deploy/ollama-embed -- ollama list
-      retries: 24
-      delay: 15
-      register: embed_verify
-      until: embed_verify.rc == 0 and models.embed.tag in embed_verify.stdout
+      shell: kubectl -n graphrag scale deploy/vllm-extract --replicas=1
 
-    - name: Wait for vLLM extraction to be ready
+    - name: Wait for vllm-extract to be ready
       become: true
       become_user: "{{ local_user }}"
-      shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=vllm-extract --timeout=300s
-      retries: 3
+      shell: kubectl -n graphrag wait --for=condition=Ready pod -l app=vllm-extract --timeout=600s
+      retries: 2
       delay: 15
       register: extract_ready
       until: extract_ready.rc == 0
 
-    - name: Wait for vLLM reranker to be ready
+    - name: "Start vllm-query (second largest allocation)"
+      become: true
+      become_user: "{{ local_user }}"
+      shell: kubectl -n graphrag scale deploy/vllm-query --replicas=1
+
+    - name: Wait for vllm-query to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: kubectl -n graphrag wait --for=condition=Ready pod -l app=vllm-query --timeout=600s
+      retries: 2
+      delay: 15
+      register: query_ready
+      until: query_ready.rc == 0
+
+    - name: "Start vllm-embed and vllm-rerank (small allocations, safe in parallel)"
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=vllm-rerank --timeout=300s
+        kubectl -n graphrag scale deploy/vllm-embed --replicas=1
+        kubectl -n graphrag scale deploy/vllm-rerank --replicas=1
+
+    - name: Wait for vllm-embed to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: kubectl -n graphrag wait --for=condition=Ready pod -l app=vllm-embed --timeout=300s
       retries: 3
       delay: 15
-      register: rerank_verify
-      until: rerank_verify.rc == 0
+      register: embed_ready
+      until: embed_ready.rc == 0
 
-    - name: Wait for LightRAG pod to be ready
+    - name: Wait for vllm-rerank to be ready
       become: true
       become_user: "{{ local_user }}"
-      shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=lightrag --timeout=300s
+      shell: kubectl -n graphrag wait --for=condition=Ready pod -l app=vllm-rerank --timeout=300s
       retries: 3
       delay: 15
-      register: lightrag_ready
-      until: lightrag_ready.rc == 0
+      register: rerank_ready
+      until: rerank_ready.rc == 0
 
-    - name: Wait for code-preprocessor pod to be ready
+    # ── Wait for application pods ────────────────────────────────
+    - name: Wait for application pods
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=code-preprocessor --timeout=120s
+        kubectl -n graphrag wait --for=condition=Ready pod -l app={{ item }} --timeout=300s
+      loop:
+        - lightrag
+        - code-preprocessor
+        - orchestrator
+        - ingest-worker
+        - ingestion-ui
+        - queue-scaler
       retries: 3
       delay: 10
-      register: preprocessor_ready
-      until: preprocessor_ready.rc == 0
-
-    - name: Wait for Redis pod to be ready
-      become: true
-      become_user: "{{ local_user }}"
-      shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=redis --timeout=120s
-      retries: 3
-      delay: 10
-      register: redis_ready
-      until: redis_ready.rc == 0
-
-    - name: Wait for orchestrator pod to be ready
-      become: true
-      become_user: "{{ local_user }}"
-      shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=orchestrator --timeout=120s
-      retries: 3
-      delay: 10
-      register: orchestrator_ready
-      until: orchestrator_ready.rc == 0
-
-    - name: Wait for NATS pod to be ready
-      become: true
-      become_user: "{{ local_user }}"
-      shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=nats --timeout=120s
-      retries: 3
-      delay: 10
-      register: nats_ready
-      until: nats_ready.rc == 0
-
-    - name: Wait for ingest-worker pod to be ready
-      become: true
-      become_user: "{{ local_user }}"
-      shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=ingest-worker --timeout=120s
-      retries: 3
-      delay: 10
-      register: ingest_worker_ready
-      until: ingest_worker_ready.rc == 0
-
-    - name: Wait for ingestion-ui pod to be ready
-      become: true
-      become_user: "{{ local_user }}"
-      shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=ingestion-ui --timeout=120s
-      retries: 3
-      delay: 10
-      register: ingestion_ui_ready
-      until: ingestion_ui_ready.rc == 0
-
-    - name: Wait for queue-scaler pod to be ready
-      become: true
-      become_user: "{{ local_user }}"
-      shell: |
-        kubectl -n graphrag wait --for=condition=Ready pod -l app=queue-scaler --timeout=120s
-      retries: 3
-      delay: 10
-      register: queue_scaler_ready
-      until: queue_scaler_ready.rc == 0
+      register: app_ready
+      until: app_ready.rc == 0
 
     # ── Enable pgvector extension ──────────────────────────────────
     - name: Enable pgvector extension in PostgreSQL
@@ -285,36 +259,21 @@
         echo "=== GraphRAG Services ==="
         kubectl get svc -n graphrag
         echo ""
-        echo "=== Model Status ==="
-        echo "Embedding (Ollama):"
-        kubectl -n graphrag exec deploy/ollama-embed -- ollama list 2>/dev/null || echo "  (not ready)"
-        echo "Extraction (vLLM):"
-        kubectl -n graphrag get pod -l app=vllm-extract --no-headers 2>/dev/null || echo "  (not running)"
-        echo "Reranker (vLLM):"
-        kubectl -n graphrag get pod -l app=vllm-rerank --no-headers 2>/dev/null || echo "  (not running)"
-        echo "Queue Scaler:"
-        kubectl -n graphrag get pod -l app=queue-scaler --no-headers 2>/dev/null || echo "  (not running)"
+        echo "=== vLLM Memory Allocation ==="
+        for d in vllm-extract vllm-query vllm-embed vllm-rerank; do
+          kv=$(kubectl -n graphrag logs deploy/$d 2>/dev/null | grep "KV cache memory" | tail -1 | awk '{print $NF, $(NF-1)}')
+          echo "  $d: KV cache $kv"
+        done
+        echo ""
+        echo "=== System Memory ==="
+        free -h | head -2
         echo ""
         echo "=== Endpoints ==="
+        echo "Ingestion UI:         http://localhost:31300"
+        echo "GraphRAG Orchestrator: http://localhost:31800"
         echo "LightRAG API:         http://localhost:31436"
         echo "Neo4j Browser:        http://localhost:31474"
         echo "Code Preprocessor:    http://localhost:31490"
-        echo "GraphRAG Orchestrator: http://localhost:31800"
-        echo "Ingestion UI:         http://localhost:31300"
-        echo ""
-        echo "=== Cluster-internal ==="
-        echo "LightRAG:             http://lightrag.graphrag.svc.cluster.local:9621"
-        echo "Neo4j Bolt:           bolt://neo4j.graphrag.svc.cluster.local:7687"
-        echo "PostgreSQL:           postgresql.graphrag.svc.cluster.local:5432"
-        echo "Embedding (Ollama):   http://ollama-embed.graphrag.svc.cluster.local:11434"
-        echo "Extraction (vLLM):    http://vllm-extract.graphrag.svc.cluster.local:8000"
-        echo "Reranker (vLLM):      http://vllm-rerank.graphrag.svc.cluster.local:8000"
-        echo "Code Preprocessor:    http://code-preprocessor.graphrag.svc.cluster.local:8090"
-        echo "Orchestrator:         http://orchestrator.graphrag.svc.cluster.local:8100"
-        echo "NATS:                 nats://nats.graphrag.svc.cluster.local:4222"
-        echo "Ingest Worker:        (NATS consumer on INGEST stream, {{ graphrag.ingest_worker_replicas }} replicas)"
-        echo "Queue Scaler:         (NATS queue-depth auto-scaler)"
-        echo "Ingestion UI:         http://ingestion-ui.graphrag.svc.cluster.local:8080"
       register: status
 
     - name: Display status

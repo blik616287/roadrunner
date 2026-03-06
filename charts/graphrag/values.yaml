@@ -9,7 +9,7 @@ embedding:
   port: 8000
   pvc: vllm-embed-data
   maxModelLen: "8192"
-  gpuMemoryUtilization: "0.15"
+  gpuMemoryUtilization: "0.03"
 
   persistence:
     storageClass: longhorn-models
@@ -36,11 +36,34 @@ extraction:
   port: 8000
   maxModelLen: "8192"
   maxNumSeqs: "8"
-  gpuMemoryUtilization: "0.30"
+  gpuMemoryUtilization: "0.35"
 
   persistence:
     storageClass: longhorn-models
     size: 25Gi
+  resources:
+    requests:
+      cpu: "2"
+      memory: 16Gi
+    limits:
+      cpu: "8"
+      memory: 32Gi
+      nvidia.com/gpu: "1"
+
+# -- Query LLM served by vLLM (dedicated for explain/synthesis)
+query:
+  enabled: true
+  image: vllm/vllm-openai:nightly-aarch64
+  model: "Qwen3-30B-A3B-Instruct-2507"
+  modelPath: "/data/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
+  tokenizer: "/data/tokenizer"
+  dtype: "half"
+  servedModelName: "qwen3-30b-a3b-query"
+  pvc: "model-qwen3-30b-a3b"
+  port: 8000
+  maxModelLen: "8192"
+  maxNumSeqs: "2"
+  gpuMemoryUtilization: "0.17"
   resources:
     requests:
       cpu: "2"
@@ -94,7 +117,7 @@ lightrag:
     host: "http://vllm-rerank:8000/rerank"
   llmTimeout: "600"            # LLM worker timeout in seconds (default 180, increase for larger models)
   maxAsync: "8"                 # concurrent document processing (default 8)
-  maxParallelInsert: "4"        # concurrent database inserts (default 4)
+  maxParallelInsert: "8"        # concurrent database inserts (default 4)
   # Embedding throughput tuning
   embeddingBatchNum: "32"      # chunks per embedding call (default 10)
   embeddingFuncMaxAsync: "4"   # concurrent embedding calls (default 8)
@@ -102,7 +125,7 @@ lightrag:
   # Pipelined embedding + extraction (workspace_patch.py)
   pipelinedEmbedding: "1"     # 1=overlap embedding with extraction, 0=sequential
   # Extraction optimization patches (workspace_patch.py)
-  codeExtractionPrompt: "1"    # 1=code-focused prompt+entity types, 0=default generic
+  filetypePrompts: "1"         # 1=per-file-type extraction prompts, 0=default generic
   llmMaxTokens: "2048"         # max_tokens cap for LLM extraction calls (0=unlimited)
   typedRelationships: "1"      # 1=use extraction keywords as Neo4j relationship types, 0=all DIRECTED
   # Storage backends
