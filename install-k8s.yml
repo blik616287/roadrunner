@@ -328,7 +328,7 @@
                 failRequestsGreaterThanOne: false
                 resources:
                   - name: nvidia.com/gpu
-                    replicas: 3
+                    replicas: 4
         EOF
       environment:
         KUBECONFIG: "{{ kubeconfig }}"

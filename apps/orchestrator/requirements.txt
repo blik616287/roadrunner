@@ -7,3 +7,4 @@ asyncpg==0.30.0
 redis[hiredis]==5.2.1
 python-multipart==0.0.20
 nats-py==2.9.0
+neo4j==5.28.1

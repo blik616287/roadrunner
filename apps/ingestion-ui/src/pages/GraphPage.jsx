@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useWorkspace } from '../hooks/useWorkspaceContext';
 import { useGraph } from '../hooks/useGraph';
+import { reconcileGraph } from '../api';
 import GraphViewer from '../components/GraphViewer';
 
 export default function GraphPage() {
@@ -8,10 +9,26 @@ export default function GraphPage() {
   const { graphData, loading, error, fetchGraph, fetchFullGraph } = useGraph(workspace);
   const [query, setQuery] = useState('');
   const [selectedNode, setSelectedNode] = useState(null);
+  const [reconciling, setReconciling] = useState(false);
+  const [reconcileResult, setReconcileResult] = useState(null);
 
   const handleSubmit = (e) => {
     e.preventDefault();
     if (query.trim()) fetchGraph(query.trim());
+  };
+
+  const handleReconcile = async () => {
+    try {
+      setReconciling(true);
+      setReconcileResult(null);
+      const result = await reconcileGraph(workspace);
+      setReconcileResult(result);
+      fetchFullGraph();
+    } catch (err) {
+      setReconcileResult({ error: err.message });
+    } finally {
+      setReconciling(false);
+    }
   };
 
   return (
@@ -41,7 +58,24 @@ export default function GraphPage() {
         >
           Show All
         </button>
+        <button
+          type="button"
+          onClick={handleReconcile}
+          disabled={reconciling || loading}
+          className="bg-orange-600 text-white px-4 py-2 rounded text-sm hover:bg-orange-700 disabled:opacity-50"
+        >
+          {reconciling ? 'Reconciling...' : 'Reconcile'}
+        </button>
       </form>
+
+      {reconcileResult && (
+        <div className={`border rounded p-3 text-sm mb-4 ${reconcileResult.error ? 'bg-red-50 border-red-200 text-red-700' : 'bg-orange-50 border-orange-200 text-orange-800'}`}>
+          {reconcileResult.error
+            ? reconcileResult.error
+            : `Created ${reconcileResult.bridges_created} bridge edges across ${reconcileResult.isolated_clusters || 0} isolated clusters (${reconcileResult.clusters_found} total components)`}
+          <button onClick={() => setReconcileResult(null)} className="ml-3 text-xs text-gray-400 hover:text-gray-600">dismiss</button>
+        </div>
+      )}
 
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 rounded p-3 text-sm mb-4">{error}</div>
@@ -53,6 +87,9 @@ export default function GraphPage() {
           <div className="absolute top-2 right-2 w-64 bg-white border rounded shadow-lg p-4 z-10">
             <h3 className="font-semibold text-sm mb-2">{selectedNode.label}</h3>
             <p className="text-xs text-gray-500 mb-1">Type: {selectedNode.type}</p>
+            {selectedNode.weight > 1 && (
+              <p className="text-xs text-gray-500 mb-1">Chunks: {selectedNode.weight}</p>
+            )}
             {selectedNode.description && (
               <p className="text-xs text-gray-600 mt-2">{selectedNode.description}</p>
             )}

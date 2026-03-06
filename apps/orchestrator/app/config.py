@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     summarizer_url: str = "http://vllm-extract:8000/v1"
     summarizer_model: str = "qwen3-8b-extract"
 
+    # Query LLM (dedicated vllm-query for explain/synthesis)
+    query_llm_url: str = "http://vllm-query:8000/v1"
+    query_llm_model: str = "qwen3-30b-a3b-query"
+
+    # Neo4j
+    neo4j_uri: str = "bolt://neo4j:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "graphrag-local-2024"
+
     # Memory thresholds
     promote_after_turns: int = 10
     archival_after_turns: int = 20

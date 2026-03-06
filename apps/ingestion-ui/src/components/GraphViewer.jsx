@@ -21,11 +21,25 @@ function getColor(type) {
 }
 
 const ZOOM_STEP = 1.5;
+const BASE_RADIUS = 5;
+const MIN_RADIUS = 3;
+const MAX_RADIUS = 20;
+const BASE_LINK_WIDTH = 1.5;
+const MAX_LINK_WIDTH = 16;
 
 export default function GraphViewer({ graphData, onNodeClick }) {
+  const [balloon, setBalloon] = useState(false);
   const fgRef = useRef();
   const containerRef = useRef();
   const [dimensions, setDimensions] = useState({ width: 0, height: 600 });
+
+  // Compute max weights for scaling
+  const maxNodeWeight = balloon
+    ? Math.max(1, ...graphData.nodes.map((n) => n.weight || 1))
+    : 1;
+  const maxLinkWeight = balloon
+    ? Math.max(1, ...graphData.links.map((l) => l.weight || 1))
+    : 1;
 
   const zoomIn = () => {
     const fg = fgRef.current;
@@ -64,19 +78,43 @@ export default function GraphViewer({ graphData, onNodeClick }) {
     }
   }, [graphData, dimensions]);
 
+  const getRadius = useCallback((node) => {
+    if (!balloon) return BASE_RADIUS;
+    const w = node.weight || 1;
+    const logMax = Math.log(maxNodeWeight + 1);
+    const t = logMax > 0 ? Math.log(w + 1) / logMax : 0;
+    return MIN_RADIUS + t * (MAX_RADIUS - MIN_RADIUS);
+  }, [balloon, maxNodeWeight]);
+
   const paintNode = useCallback((node, ctx) => {
-    const r = 5;
+    const r = getRadius(node);
     ctx.beginPath();
     ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
     ctx.fillStyle = getColor(node.type);
     ctx.fill();
+
+    if (balloon && (node.weight || 0) > 1) {
+      ctx.font = `${Math.max(2, r * 0.6)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(String(node.weight), node.x, node.y);
+    }
 
     ctx.font = '3px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillStyle = '#374151';
     ctx.fillText(node.label, node.x, node.y + r + 1);
-  }, []);
+  }, [balloon, getRadius]);
+
+  const getLinkWidth = useCallback((link) => {
+    if (!balloon) return BASE_LINK_WIDTH;
+    const w = link.weight || 1;
+    const logMax = Math.log(maxLinkWeight + 1);
+    const t = logMax > 0 ? Math.log(w + 1) / logMax : 0;
+    return BASE_LINK_WIDTH + t * (MAX_LINK_WIDTH - BASE_LINK_WIDTH);
+  }, [balloon, maxLinkWeight]);
 
   const hasData = graphData.nodes.length > 0;
   const ready = hasData && dimensions.width > 0;
@@ -94,19 +132,21 @@ export default function GraphViewer({ graphData, onNodeClick }) {
           <button onClick={zoomIn} className="w-8 h-8 bg-white border rounded shadow text-lg leading-none hover:bg-gray-50" title="Zoom in">+</button>
           <button onClick={zoomOut} className="w-8 h-8 bg-white border rounded shadow text-lg leading-none hover:bg-gray-50" title="Zoom out">&minus;</button>
           <button onClick={zoomFit} className="w-8 h-8 bg-white border rounded shadow text-xs leading-none hover:bg-gray-50" title="Fit to screen">Fit</button>
+          <button onClick={() => setBalloon(b => !b)} className={`w-8 h-8 border rounded shadow text-xs leading-none ${balloon ? 'bg-blue-600 text-white border-blue-600' : 'bg-white hover:bg-gray-50'}`} title="Toggle weight sizing">Wght</button>
         </div>
         <ForceGraph2D
           ref={fgRef}
           graphData={graphData}
           nodeCanvasObject={paintNode}
           nodePointerAreaPaint={(node, color, ctx) => {
+            const r = getRadius(node);
             ctx.beginPath();
-            ctx.arc(node.x, node.y, 5, 0, 2 * Math.PI);
+            ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
             ctx.fillStyle = color;
             ctx.fill();
           }}
           linkColor={() => '#d1d5db'}
-          linkWidth={0.5}
+          linkWidth={getLinkWidth}
           linkDirectionalArrowLength={3}
           linkDirectionalArrowRelPos={1}
           onNodeClick={onNodeClick}

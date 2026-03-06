@@ -20,13 +20,20 @@ async def query(
         client = httpx.AsyncClient()
         should_close = True
 
+    payload = {"query": text, "mode": mode}
+    # For graph-aware modes, supply keywords from the query text to skip
+    # LLM keyword extraction (which is slow and may timeout)
+    if mode in ("local", "global", "hybrid", "mix"):
+        payload["ll_keywords"] = [text]
+        payload["hl_keywords"] = [text]
+
     empty = {"entities": [], "relations": [], "chunks": []}
     try:
         resp = await client.post(
             f"{_lightrag_url}/query/data",
-            json={"query": text, "mode": mode},
+            json=payload,
             headers={"LIGHTRAG-WORKSPACE": workspace},
-            timeout=15.0,
+            timeout=30.0,
         )
         if resp.status_code == 200:
             payload = resp.json()

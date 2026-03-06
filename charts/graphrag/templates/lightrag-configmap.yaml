@@ -58,7 +58,7 @@ data:
   EMBEDDING_FUNC_MAX_ASYNC: {{ .Values.lightrag.embeddingFuncMaxAsync | default "8" | quote }}
   EMBEDDING_TIMEOUT: {{ .Values.lightrag.embeddingTimeout | default "30" | quote }}
   # Extraction optimization patches (workspace_patch.py)
-  CODE_EXTRACTION_PROMPT: {{ .Values.lightrag.codeExtractionPrompt | default "0" | quote }}
+  FILETYPE_PROMPTS: {{ .Values.lightrag.filetypePrompts | default "0" | quote }}
   LLM_MAX_TOKENS: {{ .Values.lightrag.llmMaxTokens | default "0" | quote }}
   TYPED_RELATIONSHIPS: {{ .Values.lightrag.typedRelationships | default "0" | quote }}
   PIPELINED_EMBEDDING: {{ .Values.lightrag.pipelinedEmbedding | default "0" | quote }}

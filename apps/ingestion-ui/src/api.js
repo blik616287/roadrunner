@@ -99,10 +99,19 @@ export const queryGraph = (query, workspace, mode = 'naive', opts = {}) => {
 };
 
 export const queryExplain = (query, workspace, mode = 'mix') =>
-  request(`${LIGHTRAG}/query`, {
+  request(`${API}/v1/data/explain`, {
     method: 'POST',
-    headers: { 'LIGHTRAG-WORKSPACE': workspace, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, mode, stream: false }),
+    body: JSON.stringify({ query, workspace, mode }),
+  });
+
+// Weights (balloon visualization)
+export const getWeights = (workspace) =>
+  request(`${API}/v1/data/weights?workspace=${encodeURIComponent(workspace)}`);
+
+// Reconcile
+export const reconcileGraph = (workspace) =>
+  request(`${API}/v1/data/reconcile?workspace=${encodeURIComponent(workspace)}`, {
+    method: 'POST',
   });
 
 // Graph
