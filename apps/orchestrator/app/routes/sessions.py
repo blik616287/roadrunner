@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ..auth import get_current_user
 from ..models import SessionInfo
 from ..services import recall_memory, working_memory
 
@@ -7,7 +8,7 @@ router = APIRouter()
 
 
 @router.get("/v1/sessions")
-async def list_sessions(workspace: str | None = Query(default=None)):
+async def list_sessions(workspace: str | None = Query(default=None), _user: dict = Depends(get_current_user)):
     sessions = await recall_memory.list_sessions(workspace)
     return {
         "sessions": [
@@ -26,7 +27,7 @@ async def list_sessions(workspace: str | None = Query(default=None)):
 
 
 @router.delete("/v1/sessions/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, _user: dict = Depends(get_current_user)):
     info = await recall_memory.get_session_info(session_id)
     if not info:
         raise HTTPException(404, f"Session {session_id} not found")

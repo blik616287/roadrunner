@@ -1,7 +1,11 @@
 import { useState } from 'react';
 import { deleteDocument, deleteLightragDocs, downloadDocumentUrl } from '../api';
 import { useWorkspace } from '../hooks/useWorkspaceContext';
+import useSort from '../hooks/useSort';
+import usePagination from '../hooks/usePagination';
 import JobStatusBadge from './JobStatusBadge';
+import SortHeader from './SortHeader';
+import Pagination from './Pagination';
 
 export default function DocumentTable({ documents, lightragDocs, onRefresh }) {
   const { workspace } = useWorkspace();
@@ -10,19 +14,31 @@ export default function DocumentTable({ documents, lightragDocs, onRefresh }) {
   // Build map of LightRAG docs keyed by file_path
   const lrByPath = new Map();
   if (lightragDocs) {
-    for (const [, docs] of Object.entries(lightragDocs)) {
-      for (const doc of docs) {
+    // Process in priority order: processed > processing > pending > failed
+    // so the best status wins when multiple docs share a file_path
+    const statusOrder = ['failed', 'pending', 'processing', 'processed'];
+    for (const status of statusOrder) {
+      for (const doc of (lightragDocs[status] || [])) {
         const fp = doc.file_path || '';
         if (fp) lrByPath.set(fp, doc);
       }
     }
   }
 
+  // Derive a single merged status from ingestion + graph status.
+  const mergedStatus = (ingestStatus, lrDoc) => {
+    if (lrDoc) {
+      if (lrDoc.status === 'processed') return 'completed';
+      if (lrDoc.status === 'processing') return 'indexing';
+      if (lrDoc.status === 'failed') return 'failed';
+    }
+    return ingestStatus;
+  };
+
   // Merge: for each orchestrator doc, find matching LightRAG doc
   const matchedLrPaths = new Set();
   const merged = documents.map((d) => {
     const fileName = d.file_name || d.job_type || '-';
-    // Match by file_name against LightRAG file_path
     let lrDoc = lrByPath.get(fileName);
     if (!lrDoc) {
       for (const [fp, doc] of lrByPath) {
@@ -33,14 +49,27 @@ export default function DocumentTable({ documents, lightragDocs, onRefresh }) {
       }
     }
     if (lrDoc) matchedLrPaths.add(lrDoc.file_path);
-    return { ...d, fileName, lrDoc };
+    return { ...d, fileName, lrDoc, _status: mergedStatus(d.status, lrDoc) };
   });
 
   // LightRAG-only docs (not tracked by orchestrator)
   const orphaned = [];
   for (const [fp, doc] of lrByPath) {
-    if (!matchedLrPaths.has(fp)) orphaned.push(doc);
+    if (!matchedLrPaths.has(fp)) {
+      orphaned.push({
+        _id: doc.id,
+        fileName: doc.file_path || doc.id,
+        _status: doc.status === 'processed' ? 'completed' : doc.status,
+        created_at: doc.created_at || '',
+        _orphan: true,
+        _lrDoc: doc,
+      });
+    }
   }
+
+  const allRows = [...merged, ...orphaned];
+  const { sorted, sortKey, sortDir, toggle } = useSort(allRows, 'documents', 'created_at', 'desc');
+  const { paged, page, pageSize, totalPages, totalItems, setPage, changePageSize, PAGE_SIZE_OPTIONS } = usePagination(sorted, 'documents');
 
   const handleDelete = async (docId) => {
     if (!confirm('Delete this document and its knowledge graph data?')) return;
@@ -68,38 +97,48 @@ export default function DocumentTable({ documents, lightragDocs, onRefresh }) {
     }
   };
 
-  if (!merged.length && !orphaned.length) {
+  if (!allRows.length) {
     return <p className="text-gray-400 text-sm py-4">No documents found.</p>;
   }
+
+  const thProps = { currentKey: sortKey, currentDir: sortDir, onToggle: toggle };
 
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b text-left text-gray-500">
-            <th className="py-2 pr-3 font-medium">File</th>
-            <th className="py-2 pr-3 font-medium">Ingestion</th>
-            <th className="py-2 pr-3 font-medium">Graph</th>
-            <th className="py-2 pr-3 font-medium">Created</th>
+            <SortHeader label="File" sortKey="fileName" {...thProps} />
+            <SortHeader label="Status" sortKey="_status" {...thProps} />
+            <SortHeader label="Created" sortKey="created_at" {...thProps} />
             <th className="py-2 pr-3 font-medium">Actions</th>
           </tr>
         </thead>
         <tbody>
-          {merged.map((d) => (
+          {paged.map((d) => d._orphan ? (
+            <tr key={d._id} className="border-b border-gray-100 hover:bg-gray-50 bg-yellow-50">
+              <td className="py-2 pr-3 max-w-[300px] truncate" title={d.fileName}>
+                {d.fileName}
+                <span className="ml-1 text-xs text-yellow-600">(graph only)</span>
+              </td>
+              <td className="py-2 pr-3"><JobStatusBadge status={d._status} /></td>
+              <td className="py-2 pr-3 text-xs">
+                {d.created_at ? new Date(d.created_at).toLocaleString() : '-'}
+              </td>
+              <td className="py-2 pr-3">
+                <button
+                  onClick={() => handleDeleteLrDoc(d._id)}
+                  disabled={deleting === d._id}
+                  className="text-red-600 hover:underline text-xs disabled:opacity-50"
+                >
+                  {deleting === d._id ? 'Deleting...' : 'Delete'}
+                </button>
+              </td>
+            </tr>
+          ) : (
             <tr key={d.job_id} className="border-b border-gray-100 hover:bg-gray-50">
               <td className="py-2 pr-3 max-w-[300px] truncate" title={d.fileName}>{d.fileName}</td>
-              <td className="py-2 pr-3"><JobStatusBadge status={d.status} /></td>
-              <td className="py-2 pr-3">
-                {d.lrDoc ? (
-                  <span className={`text-xs px-1.5 py-0.5 rounded ${
-                    d.lrDoc.status === 'processed' ? 'bg-green-100 text-green-700' :
-                    d.lrDoc.status === 'processing' ? 'bg-blue-100 text-blue-700' :
-                    'bg-gray-100 text-gray-600'
-                  }`}>{d.lrDoc.status}</span>
-                ) : (
-                  <span className="text-xs text-gray-400">-</span>
-                )}
-              </td>
+              <td className="py-2 pr-3"><JobStatusBadge status={d._status} /></td>
               <td className="py-2 pr-3 text-xs">{new Date(d.created_at).toLocaleString()}</td>
               <td className="py-2 pr-3 space-x-2">
                 <a
@@ -120,36 +159,13 @@ export default function DocumentTable({ documents, lightragDocs, onRefresh }) {
               </td>
             </tr>
           ))}
-          {orphaned.map((doc) => (
-            <tr key={doc.id} className="border-b border-gray-100 hover:bg-gray-50 bg-yellow-50">
-              <td className="py-2 pr-3 max-w-[300px] truncate" title={doc.file_path}>
-                {doc.file_path || doc.id}
-                <span className="ml-1 text-xs text-yellow-600">(graph only)</span>
-              </td>
-              <td className="py-2 pr-3"><span className="text-xs text-gray-400">-</span></td>
-              <td className="py-2 pr-3">
-                <span className={`text-xs px-1.5 py-0.5 rounded ${
-                  doc.status === 'processed' ? 'bg-green-100 text-green-700' :
-                  doc.status === 'processing' ? 'bg-blue-100 text-blue-700' :
-                  'bg-gray-100 text-gray-600'
-                }`}>{doc.status}</span>
-              </td>
-              <td className="py-2 pr-3 text-xs">
-                {doc.created_at ? new Date(doc.created_at).toLocaleString() : '-'}
-              </td>
-              <td className="py-2 pr-3">
-                <button
-                  onClick={() => handleDeleteLrDoc(doc.id)}
-                  disabled={deleting === doc.id}
-                  className="text-red-600 hover:underline text-xs disabled:opacity-50"
-                >
-                  {deleting === doc.id ? 'Deleting...' : 'Delete'}
-                </button>
-              </td>
-            </tr>
-          ))}
         </tbody>
       </table>
+      <Pagination
+        page={page} totalPages={totalPages} totalItems={totalItems}
+        pageSize={pageSize} onPageChange={setPage} onPageSizeChange={changePageSize}
+        pageSizeOptions={PAGE_SIZE_OPTIONS}
+      />
     </div>
   );
 }

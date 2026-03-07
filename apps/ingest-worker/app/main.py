@@ -3,12 +3,13 @@ import json
 import logging
 import signal
 
+import httpx
 import nats
 from nats.js.api import StreamConfig
 
 from .config import Settings
 from .db import init_pool, close_pool, get_job, mark_job_started, mark_job_indexing, mark_job_completed, mark_job_failed, reset_job_queued
-from .processor import process_document, process_codebase, poll_track_status
+from .processor import process_documents_batch, process_codebase
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ingest-worker")
@@ -39,71 +40,69 @@ async def setup_stream(js):
         logger.info(f"Created stream {STREAM_NAME}")
 
 
-async def _poll_and_complete(job_id: str, track_ids: list[str], workspace: str):
-    """Background task: poll LightRAG track_status until all docs are processed."""
-    try:
-        timed_out = await poll_track_status(
-            track_ids, workspace, settings.lightrag_url,
-            settings.indexing_poll_timeout, settings.indexing_poll_interval,
-        )
-        result = {"track_ids": track_ids}
-        if timed_out:
-            result["indexing_timeout"] = True
-            logger.warning(f"Job {job_id} indexing poll timed out, marking completed anyway")
-        await mark_job_completed(job_id, result)
-        logger.info(f"Job {job_id} extraction completed ({len(track_ids)} tracks)")
-    except Exception as e:
-        logger.error(f"Job {job_id} poll failed: {e}")
-        await mark_job_failed(job_id, f"status poll error: {e}")
+async def _poll_track_status(track_ids: list[str], workspace: str) -> tuple[bool, bool]:
+    """Poll LightRAG track_status until all tracks complete or timeout.
+
+    Returns (all_done, any_failed).
+    """
+    deadline = asyncio.get_event_loop().time() + settings.indexing_poll_timeout
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        while asyncio.get_event_loop().time() < deadline:
+            all_done = True
+            any_failed = False
+            for tid in track_ids:
+                try:
+                    resp = await client.get(
+                        f"{settings.lightrag_url}/documents/track_status/{tid}",
+                        headers={"LIGHTRAG-WORKSPACE": workspace},
+                    )
+                    if resp.status_code != 200:
+                        all_done = False
+                        continue
+                    summary = resp.json().get("status_summary", {})
+                    total = sum(summary.values())
+                    processed = summary.get("processed", 0)
+                    failed = summary.get("failed", 0)
+                    if total == 0 or (processed + failed) < total:
+                        all_done = False
+                    if failed > 0:
+                        any_failed = True
+                except Exception:
+                    all_done = False
+            if all_done:
+                return True, any_failed
+            await asyncio.sleep(settings.indexing_poll_interval)
+    return False, False  # timed out
 
 
-async def handle_message(msg):
-    """Process a single NATS message."""
-    try:
-        payload = json.loads(msg.data.decode())
-        job_id = payload["job_id"]
-        job_type = payload.get("type", "document")
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.error(f"Invalid message payload: {e}")
-        await msg.term()
-        return
-
-    logger.info(f"Processing job {job_id} (type={job_type})")
-
-    job = await get_job(job_id)
-    if not job:
-        logger.error(f"Job {job_id} not found in database")
-        await msg.term()
-        return
-
-    if job["status"] == "completed":
-        logger.info(f"Job {job_id} already completed, skipping")
-        await msg.ack()
-        return
-
-    await mark_job_started(job_id)
-
+async def _process_and_ack(msg, job_id: str, job_type: str, job: dict):
+    """Process a single job: decompress → preprocess → poll until done → ack."""
     try:
         if job_type == "codebase":
             result = await process_codebase(
                 job_id, job["doc_id"], settings.preprocessor_url, settings.batch_size
             )
         else:
-            result = await process_document(
-                job_id, job["doc_id"], settings.preprocessor_url
+            result = await process_documents_batch(
+                [job["doc_id"]], settings.preprocessor_url, settings.batch_size
             )
 
         track_ids = result.get("track_ids", [])
-
         if track_ids:
-            # Mark as indexing and ack immediately — poll in background
             await mark_job_indexing(job_id, result)
-            logger.info(f"Job {job_id} indexing: {len(track_ids)} tracks, polling in background")
-            asyncio.create_task(_poll_and_complete(job_id, track_ids, job["workspace"]))
+            logger.info(f"Job {job_id} sent to LightRAG: {len(track_ids)} tracks, polling...")
+            done, failed = await _poll_track_status(track_ids, job["workspace"])
+            if done and not failed:
+                await mark_job_completed(job_id, result)
+                logger.info(f"Job {job_id} completed")
+            elif done and failed:
+                await mark_job_failed(job_id, "LightRAG extraction failed")
+                logger.warning(f"Job {job_id} failed in LightRAG")
+            else:
+                logger.warning(f"Job {job_id} poll timed out, left as indexing")
         else:
-            # No track_ids (all duplicates or errors) — complete immediately
             await mark_job_completed(job_id, result)
-            logger.info(f"Job {job_id} completed (no new docs): {result}")
+            logger.info(f"Job {job_id} completed (no new docs)")
 
         await msg.ack()
 
@@ -113,11 +112,100 @@ async def handle_message(msg):
         if attempts >= settings.max_redeliveries:
             await mark_job_failed(job_id, str(e))
             await msg.term()
-            logger.error(f"Job {job_id} permanently failed after {attempts} attempts")
         else:
             await mark_job_failed(job_id, str(e))
             await reset_job_queued(job_id)
             await msg.nak()
+
+
+async def handle_messages(messages):
+    """Process a batch of NATS messages. Document jobs in the same workspace are batched together."""
+    parsed = []
+    for msg in messages:
+        try:
+            payload = json.loads(msg.data.decode())
+            job_id = payload["job_id"]
+            job_type = payload.get("type", "document")
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error(f"Invalid message payload: {e}")
+            await msg.term()
+            continue
+
+        job = await get_job(job_id)
+        if not job:
+            logger.error(f"Job {job_id} not found in database")
+            await msg.term()
+            continue
+        if job["status"] == "completed":
+            logger.info(f"Job {job_id} already completed, skipping")
+            await msg.ack()
+            continue
+
+        parsed.append((msg, job_id, job_type, job))
+
+    # Handle codebase jobs individually (already internally batched)
+    doc_jobs_by_workspace = {}
+    for msg, job_id, job_type, job in parsed:
+        if job_type == "codebase":
+            await mark_job_started(job_id)
+            await _process_and_ack(msg, job_id, job_type, job)
+        else:
+            ws = job["workspace"]
+            doc_jobs_by_workspace.setdefault(ws, []).append((msg, job_id, job))
+
+    # Batch document jobs per workspace
+    for workspace, jobs in doc_jobs_by_workspace.items():
+        job_ids = [j[1] for j in jobs]
+        doc_ids = [j[2]["doc_id"] for j in jobs]
+        msgs = [j[0] for j in jobs]
+        job_records = [j[2] for j in jobs]
+
+        for jid in job_ids:
+            await mark_job_started(jid)
+
+        logger.info(f"Batching {len(job_ids)} document jobs for workspace '{workspace}'")
+
+        try:
+            result = await process_documents_batch(
+                doc_ids, settings.preprocessor_url, settings.batch_size
+            )
+            track_ids = result.get("track_ids", [])
+
+            if track_ids:
+                for jid in job_ids:
+                    await mark_job_indexing(jid, result)
+                logger.info(f"Workspace '{workspace}' batch sent to LightRAG: {len(track_ids)} tracks, polling...")
+
+                done, failed = await _poll_track_status(track_ids, workspace)
+                if done and not failed:
+                    for jid in job_ids:
+                        await mark_job_completed(jid, result)
+                    logger.info(f"Workspace '{workspace}' batch completed ({len(job_ids)} jobs)")
+                elif done and failed:
+                    for jid in job_ids:
+                        await mark_job_failed(jid, "LightRAG extraction failed")
+                    logger.warning(f"Workspace '{workspace}' batch failed in LightRAG")
+                else:
+                    logger.warning(f"Workspace '{workspace}' batch poll timed out, left as indexing")
+            else:
+                for jid in job_ids:
+                    await mark_job_completed(jid, result)
+                logger.info(f"Workspace '{workspace}' batch completed (no new docs)")
+
+            for m in msgs:
+                await m.ack()
+
+        except Exception as e:
+            logger.error(f"Batch failed for workspace '{workspace}': {e}")
+            for m, jid, job in zip(msgs, job_ids, job_records):
+                attempts = job["attempts"] + 1
+                if attempts >= settings.max_redeliveries:
+                    await mark_job_failed(jid, str(e))
+                    await m.term()
+                else:
+                    await mark_job_failed(jid, str(e))
+                    await reset_job_queued(jid)
+                    await m.nak()
 
 
 async def run():
@@ -140,9 +228,8 @@ async def run():
 
     while not _shutdown.is_set():
         try:
-            messages = await sub.fetch(batch=1, timeout=5)
-            for msg in messages:
-                await handle_message(msg)
+            messages = await sub.fetch(batch=settings.fetch_batch, timeout=5)
+            await handle_messages(messages)
         except nats.errors.TimeoutError:
             continue
         except Exception as e:

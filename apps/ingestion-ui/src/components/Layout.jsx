@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import WorkspaceSelector from './WorkspaceSelector';
+import { useAuth } from '../hooks/useAuth';
 
 const nav = [
   { to: '/', label: 'Dashboard' },
@@ -8,10 +9,12 @@ const nav = [
   { to: '/documents', label: 'Documents' },
   { to: '/graph', label: 'Graph' },
   { to: '/query', label: 'Query' },
+  { to: '/account', label: 'Account' },
 ];
 
 export default function Layout() {
   const isDashboard = useLocation().pathname === '/';
+  const { user, authEnabled, logout } = useAuth();
   return (
     <div className="flex h-screen bg-gray-50 text-gray-900">
       <aside className="w-56 bg-gray-900 text-gray-100 flex flex-col shrink-0">
@@ -34,6 +37,22 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
+        {authEnabled && user && (
+          <div className="p-3 border-t border-gray-700">
+            <div className="flex items-center gap-2 mb-2">
+              {user.picture && (
+                <img src={user.picture} alt="" className="w-6 h-6 rounded-full" />
+              )}
+              <span className="text-gray-300 text-sm truncate">{user.email}</span>
+            </div>
+            <button
+              onClick={logout}
+              className="text-gray-400 hover:text-white text-xs"
+            >
+              Sign out
+            </button>
+          </div>
+        )}
       </aside>
       <div className="flex-1 flex flex-col overflow-hidden">
         {!isDashboard && (

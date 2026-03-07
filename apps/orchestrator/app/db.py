@@ -65,6 +65,32 @@ CREATE INDEX IF NOT EXISTS idx_ingest_jobs_workspace
     ON orchestrator_ingest_jobs(workspace);
 CREATE INDEX IF NOT EXISTS idx_ingest_jobs_doc_id
     ON orchestrator_ingest_jobs(doc_id);
+
+CREATE TABLE IF NOT EXISTS auth_users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    name TEXT,
+    picture TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_login_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS auth_api_keys (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    key_hash TEXT NOT NULL,
+    key_prefix TEXT NOT NULL,
+    rotation_days INT,
+    expires_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_api_keys_user
+    ON auth_api_keys(user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_api_keys_hash
+    ON auth_api_keys(key_hash);
 """
 
 

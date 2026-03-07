@@ -41,6 +41,10 @@ spec:
           envFrom:
             - configMapRef:
                 name: orchestrator-config
+            {{- if .Values.auth.enabled }}
+            - secretRef:
+                name: auth-secret
+            {{- end }}
           resources:
             {{- toYaml .Values.orchestrator.resources | nindent 12 }}
           readinessProbe:

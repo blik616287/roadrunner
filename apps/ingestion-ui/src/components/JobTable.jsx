@@ -1,5 +1,9 @@
 import { useState } from 'react';
+import useSort from '../hooks/useSort';
+import usePagination from '../hooks/usePagination';
 import JobStatusBadge from './JobStatusBadge';
+import SortHeader from './SortHeader';
+import Pagination from './Pagination';
 
 function formatDuration(start, end) {
   if (!start) return '-';
@@ -9,6 +13,11 @@ function formatDuration(start, end) {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
   return `${(ms / 60000).toFixed(1)}m`;
+}
+
+function durationMs(start, end) {
+  if (!start) return 0;
+  return (end ? new Date(end) : new Date()) - new Date(start);
 }
 
 function shortId(id) {
@@ -23,25 +32,36 @@ function formatTime(iso) {
 export default function JobTable({ jobs, onRetry }) {
   const [expanded, setExpanded] = useState(null);
 
+  const rows = jobs.map((j) => ({
+    ...j,
+    _file: j.file_name || j.job_type || '',
+    _duration: durationMs(j.started_at, j.completed_at),
+  }));
+
+  const { sorted, sortKey, sortDir, toggle } = useSort(rows, 'jobs', 'created_at', 'desc', '_file');
+  const { paged, page, pageSize, totalPages, totalItems, setPage, changePageSize, PAGE_SIZE_OPTIONS } = usePagination(sorted, 'jobs');
+
   if (!jobs.length) {
     return <p className="text-gray-400 text-sm py-4">No jobs found.</p>;
   }
+
+  const thProps = { currentKey: sortKey, currentDir: sortDir, onToggle: toggle };
 
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b text-left text-gray-500">
-            <th className="py-2 pr-3 font-medium">Job</th>
-            <th className="py-2 pr-3 font-medium">File</th>
-            <th className="py-2 pr-3 font-medium">Status</th>
-            <th className="py-2 pr-3 font-medium">Workspace</th>
-            <th className="py-2 pr-3 font-medium">Created</th>
-            <th className="py-2 pr-3 font-medium">Duration</th>
+            <SortHeader label="Job" sortKey="job_id" {...thProps} />
+            <SortHeader label="File" sortKey="_file" {...thProps} />
+            <SortHeader label="Status" sortKey="status" {...thProps} />
+            <SortHeader label="Workspace" sortKey="workspace" {...thProps} />
+            <SortHeader label="Created" sortKey="created_at" {...thProps} />
+            <SortHeader label="Duration" sortKey="_duration" {...thProps} />
           </tr>
         </thead>
         <tbody>
-          {jobs.map((j) => (
+          {paged.map((j) => (
             <>
               <tr
                 key={j.job_id}
@@ -49,7 +69,7 @@ export default function JobTable({ jobs, onRetry }) {
                 onClick={() => setExpanded(expanded === j.job_id ? null : j.job_id)}
               >
                 <td className="py-2 pr-3 font-mono text-xs">{shortId(j.job_id)}</td>
-                <td className="py-2 pr-3 text-xs truncate max-w-[200px]" title={j.file_name}>{j.file_name || j.job_type}</td>
+                <td className="py-2 pr-3 text-xs truncate max-w-[200px]" title={j._file}>{j._file || j.job_type}</td>
                 <td className="py-2 pr-3"><JobStatusBadge status={j.status} /></td>
                 <td className="py-2 pr-3">{j.workspace}</td>
                 <td className="py-2 pr-3 text-xs">{formatTime(j.created_at)}</td>
@@ -99,6 +119,11 @@ export default function JobTable({ jobs, onRetry }) {
           ))}
         </tbody>
       </table>
+      <Pagination
+        page={page} totalPages={totalPages} totalItems={totalItems}
+        pageSize={pageSize} onPageChange={setPage} onPageSizeChange={changePageSize}
+        pageSizeOptions={PAGE_SIZE_OPTIONS}
+      />
     </div>
   );
 }

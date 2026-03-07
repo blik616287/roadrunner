@@ -10,7 +10,7 @@ export function useWorkspaces() {
     try {
       setLoading(true);
       const data = await listWorkspaces();
-      setWorkspaces(data.workspaces);
+      setWorkspaces([...data.workspaces].sort((a, b) => a.name.localeCompare(b.name)));
       setError(null);
     } catch (e) {
       setError(e.message);

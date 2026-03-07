@@ -128,6 +128,9 @@ lightrag:
   filetypePrompts: "1"         # 1=per-file-type extraction prompts, 0=default generic
   llmMaxTokens: "2048"         # max_tokens cap for LLM extraction calls (0=unlimited)
   typedRelationships: "1"      # 1=use extraction keywords as Neo4j relationship types, 0=all DIRECTED
+  # Streaming pipeline (workspace_patch.py)
+  hotPipeline: "1"             # 1=streaming background worker, 0=legacy batch-per-request
+  hotPipelineWorkers: "4"      # concurrent doc processing slots in streaming mode
   # Storage backends
   storage:
     graph: Neo4JStorage
@@ -309,6 +312,16 @@ queueScaler:
     limits:
       cpu: "0.5"
       memory: 128Mi
+
+# -- Authentication (OIDC + API keys)
+auth:
+  enabled: false
+  googleClientId: ""
+  googleClientSecret: ""
+  sessionSecret: "change-me-in-prod"
+  redirectUri: ""              # e.g. http://192.168.1.100:31300/api/auth/callback
+  allowedDomain: ""            # e.g. "company.com" (empty = any Gmail)
+  sessionTtlSeconds: "86400"
 
 nodeSelector:
   kubernetes.io/arch: arm64
