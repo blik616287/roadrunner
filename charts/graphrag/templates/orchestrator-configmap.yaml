@@ -53,4 +53,11 @@ data:
   ARCHIVAL_AFTER_TURNS: {{ .Values.orchestrator.archivalAfterTurns | default "20" | quote }}
   RECALL_TOP_K: {{ .Values.orchestrator.recallTopK | default "3" | quote }}
   ARCHIVAL_TOP_K: {{ .Values.orchestrator.archivalTopK | default "3" | quote }}
+  {{- if .Values.auth.enabled }}
+  # Authentication
+  AUTH_ENABLED: "true"
+  AUTH_REDIRECT_URI: {{ .Values.auth.redirectUri | quote }}
+  AUTH_ALLOWED_DOMAIN: {{ .Values.auth.allowedDomain | default "" | quote }}
+  AUTH_SESSION_TTL_SECONDS: {{ .Values.auth.sessionTtlSeconds | default "86400" | quote }}
+  {{- end }}
 {{- end }}

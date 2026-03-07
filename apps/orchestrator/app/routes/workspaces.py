@@ -1,8 +1,9 @@
 import logging
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from ..auth import get_current_user
 from ..config import Settings
 from ..db import get_pool
 
@@ -18,7 +19,7 @@ def init_workspaces(settings: Settings):
 
 
 @router.delete("/v1/workspaces/{workspace}")
-async def delete_workspace(workspace: str):
+async def delete_workspace(workspace: str, _user: dict = Depends(get_current_user)):
     """Delete all orchestrator documents, jobs, and LightRAG data for a workspace."""
     pool = get_pool()
     deleted_jobs = await pool.execute(
@@ -53,7 +54,7 @@ async def delete_workspace(workspace: str):
 
 
 @router.get("/v1/workspaces")
-async def list_workspaces():
+async def list_workspaces(_user: dict = Depends(get_current_user)):
     pool = get_pool()
     rows = await pool.fetch("""
         SELECT

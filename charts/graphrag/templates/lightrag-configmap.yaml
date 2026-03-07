@@ -62,4 +62,7 @@ data:
   LLM_MAX_TOKENS: {{ .Values.lightrag.llmMaxTokens | default "0" | quote }}
   TYPED_RELATIONSHIPS: {{ .Values.lightrag.typedRelationships | default "0" | quote }}
   PIPELINED_EMBEDDING: {{ .Values.lightrag.pipelinedEmbedding | default "0" | quote }}
+  # Streaming pipeline (workspace_patch.py)
+  HOT_PIPELINE: {{ .Values.lightrag.hotPipeline | default "1" | quote }}
+  HOT_PIPELINE_WORKERS: {{ .Values.lightrag.hotPipelineWorkers | default "4" | quote }}
 {{- end }}

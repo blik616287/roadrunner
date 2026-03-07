@@ -4,9 +4,10 @@ import logging
 import uuid
 
 import httpx
-from fastapi import APIRouter, UploadFile, File, Header, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, Header, HTTPException
 from fastapi.responses import Response
 
+from ..auth import get_current_user
 from ..config import Settings
 from ..models import DocumentIngestResponse, CodebaseIngestResponse
 from ..db import get_pool
@@ -27,6 +28,7 @@ def init_documents(settings: Settings):
 async def ingest_document(
     file: UploadFile = File(...),
     x_workspace: str = Header(default="default"),
+    _user: dict = Depends(get_current_user),
 ):
     content = await file.read()
     job_id = str(uuid.uuid4())
@@ -83,7 +85,7 @@ async def ingest_document(
 
 
 @router.get("/v1/documents/{doc_id}/download")
-async def download_document(doc_id: str):
+async def download_document(doc_id: str, _user: dict = Depends(get_current_user)):
     pool = get_pool()
     row = await pool.fetchrow(
         """SELECT file_name, content_type, compressed_blob, original_size
@@ -105,7 +107,7 @@ async def download_document(doc_id: str):
 
 
 @router.delete("/v1/documents/{doc_id}")
-async def delete_document(doc_id: str):
+async def delete_document(doc_id: str, _user: dict = Depends(get_current_user)):
     pool = get_pool()
     row = await pool.fetchrow(
         "SELECT id, file_name, workspace FROM orchestrator_documents WHERE id = $1",
@@ -167,6 +169,7 @@ async def delete_document(doc_id: str):
 async def ingest_codebase(
     file: UploadFile = File(...),
     x_workspace: str = Header(default="default"),
+    _user: dict = Depends(get_current_user),
 ):
     """Ingest an entire codebase from a tar.gz or zip archive.
 

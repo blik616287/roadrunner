@@ -126,6 +126,14 @@
           --set queueScaler.burstThreshold={{ graphrag.queue_scaler.burst_threshold }} \
           --set queueScaler.hysteresisUp={{ graphrag.queue_scaler.burst_hysteresis_up }} \
           --set queueScaler.hysteresisDown={{ graphrag.queue_scaler.burst_hysteresis_down }} \
+          {% if auth is defined and auth.enabled | default(false) | bool %}
+          --set auth.enabled=true \
+          --set auth.googleClientId={{ auth.google_client_id }} \
+          --set auth.googleClientSecret={{ auth.google_client_secret }} \
+          --set auth.sessionSecret={{ auth.session_secret }} \
+          --set auth.redirectUri={{ auth.redirect_uri }} \
+          --set auth.allowedDomain={{ auth.allowed_domain | default('') }} \
+          {% endif %}
           --timeout 15m
       register: chart_install
 

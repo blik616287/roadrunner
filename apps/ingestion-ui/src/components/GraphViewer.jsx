@@ -26,12 +26,15 @@ const MIN_RADIUS = 3;
 const MAX_RADIUS = 20;
 const BASE_LINK_WIDTH = 1.5;
 const MAX_LINK_WIDTH = 16;
+const LABEL_ZOOM_THRESHOLD = 1.5;
+const COOLDOWN_MS = 5000;
 
 export default function GraphViewer({ graphData, onNodeClick }) {
   const [balloon, setBalloon] = useState(false);
   const fgRef = useRef();
   const containerRef = useRef();
   const [dimensions, setDimensions] = useState({ width: 0, height: 600 });
+  const zoomLevel = useRef(1);
 
   // Compute max weights for scaling
   const maxNodeWeight = balloon
@@ -40,6 +43,8 @@ export default function GraphViewer({ graphData, onNodeClick }) {
   const maxLinkWeight = balloon
     ? Math.max(1, ...graphData.links.map((l) => l.weight || 1))
     : 1;
+
+  const nodeCount = graphData.nodes.length;
 
   const zoomIn = () => {
     const fg = fgRef.current;
@@ -52,6 +57,10 @@ export default function GraphViewer({ graphData, onNodeClick }) {
   const zoomFit = () => {
     const fg = fgRef.current;
     if (fg) fg.zoomToFit(400, 40);
+  };
+  const reheat = () => {
+    const fg = fgRef.current;
+    if (fg) fg.d3ReheatSimulation();
   };
 
   useEffect(() => {
@@ -72,10 +81,21 @@ export default function GraphViewer({ graphData, onNodeClick }) {
     return () => obs.disconnect();
   }, []);
 
+  // Tune d3-force for better spacing
   useEffect(() => {
-    if (fgRef.current && graphData.nodes.length) {
-      setTimeout(() => fgRef.current.zoomToFit(400, 40), 1000);
-    }
+    const fg = fgRef.current;
+    if (!fg || !graphData.nodes.length) return;
+
+    const n = graphData.nodes.length;
+    // Stronger repulsion for larger graphs
+    const chargeStrength = n > 500 ? -400 : n > 100 ? -250 : -120;
+    fg.d3Force('charge').strength(chargeStrength).distanceMax(n > 500 ? 500 : 300);
+    // Longer links to spread things out
+    fg.d3Force('link').distance(n > 500 ? 80 : n > 100 ? 60 : 40);
+    // Reheat so new forces take effect
+    fg.d3ReheatSimulation();
+
+    setTimeout(() => fg.zoomToFit(400, 40), 1500);
   }, [graphData, dimensions]);
 
   const getRadius = useCallback((node) => {
@@ -86,7 +106,8 @@ export default function GraphViewer({ graphData, onNodeClick }) {
     return MIN_RADIUS + t * (MAX_RADIUS - MIN_RADIUS);
   }, [balloon, maxNodeWeight]);
 
-  const paintNode = useCallback((node, ctx) => {
+  const paintNode = useCallback((node, ctx, globalScale) => {
+    zoomLevel.current = globalScale;
     const r = getRadius(node);
     ctx.beginPath();
     ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
@@ -101,11 +122,14 @@ export default function GraphViewer({ graphData, onNodeClick }) {
       ctx.fillText(String(node.weight), node.x, node.y);
     }
 
-    ctx.font = '3px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle = '#374151';
-    ctx.fillText(node.label, node.x, node.y + r + 1);
+    // Only draw labels when zoomed in enough (expensive for large graphs)
+    if (globalScale >= LABEL_ZOOM_THRESHOLD) {
+      ctx.font = '3px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = '#374151';
+      ctx.fillText(node.label, node.x, node.y + r + 1);
+    }
   }, [balloon, getRadius]);
 
   const getLinkWidth = useCallback((link) => {
@@ -132,7 +156,11 @@ export default function GraphViewer({ graphData, onNodeClick }) {
           <button onClick={zoomIn} className="w-8 h-8 bg-white border rounded shadow text-lg leading-none hover:bg-gray-50" title="Zoom in">+</button>
           <button onClick={zoomOut} className="w-8 h-8 bg-white border rounded shadow text-lg leading-none hover:bg-gray-50" title="Zoom out">&minus;</button>
           <button onClick={zoomFit} className="w-8 h-8 bg-white border rounded shadow text-xs leading-none hover:bg-gray-50" title="Fit to screen">Fit</button>
+          <button onClick={reheat} className="w-8 h-8 bg-white border rounded shadow text-xs leading-none hover:bg-gray-50" title="Re-run layout">Re</button>
           <button onClick={() => setBalloon(b => !b)} className={`w-8 h-8 border rounded shadow text-xs leading-none ${balloon ? 'bg-blue-600 text-white border-blue-600' : 'bg-white hover:bg-gray-50'}`} title="Toggle weight sizing">Wght</button>
+        </div>
+        <div className="absolute top-2 right-2 z-10 text-xs text-gray-400 bg-white/80 px-2 py-1 rounded">
+          {nodeCount} nodes
         </div>
         <ForceGraph2D
           ref={fgRef}
@@ -152,6 +180,11 @@ export default function GraphViewer({ graphData, onNodeClick }) {
           onNodeClick={onNodeClick}
           width={dimensions.width}
           height={dimensions.height}
+          cooldownTime={COOLDOWN_MS}
+          warmupTicks={nodeCount > 500 ? 100 : 0}
+          enableNodeDrag={true}
+          d3AlphaDecay={nodeCount > 300 ? 0.05 : 0.0228}
+          d3VelocityDecay={nodeCount > 300 ? 0.5 : 0.4}
         />
         </div>
       )}

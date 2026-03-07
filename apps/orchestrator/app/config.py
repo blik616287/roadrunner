@@ -53,3 +53,12 @@ class Settings(BaseSettings):
     archival_after_turns: int = 20
     recall_top_k: int = 3
     archival_top_k: int = 3
+
+    # Authentication (OIDC + API keys)
+    auth_enabled: bool = False
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    auth_session_secret: str = "change-me-in-prod"
+    auth_session_ttl_seconds: int = 86400
+    auth_redirect_uri: str = ""
+    auth_allowed_domain: str = ""

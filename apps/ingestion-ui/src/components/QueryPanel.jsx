@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { queryGraph, queryExplain } from '../api';
+import { useState, useRef, useMemo } from 'react';
+import { marked } from 'marked';
+import { queryGraph, queryExplainStream } from '../api';
 import { useWorkspace } from '../hooks/useWorkspaceContext';
 
 const MODES = [
@@ -105,14 +106,20 @@ export default function QueryPanel() {
     }
   };
 
+  const abortRef = useRef(null);
+
   const handleExplain = async () => {
     if (!query.trim()) return;
     try {
       setExplaining(true);
       setError(null);
-      const data = await queryExplain(query, workspace, mode === 'naive' ? 'mix' : mode);
-      const text = typeof data === 'string' ? data : data.response || data.content || JSON.stringify(data, null, 2);
-      setExplanation(text);
+      setExplanation('');
+      let text = '';
+      for await (const chunk of queryExplainStream(query, workspace, mode === 'naive' ? 'mix' : mode)) {
+        text += chunk;
+        setExplanation(text);
+      }
+      if (!text) setExplanation(null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -169,10 +176,15 @@ export default function QueryPanel() {
       {explanation && (
         <div className="bg-purple-50 border border-purple-200 rounded p-4">
           <div className="flex justify-between items-center mb-2">
-            <span className="text-xs font-medium text-purple-600">LLM Explanation</span>
+            <span className="text-xs font-medium text-purple-600">
+              LLM Explanation{explaining && <span className="ml-2 animate-pulse">...</span>}
+            </span>
             <button onClick={() => setExplanation(null)} className="text-xs text-gray-400 hover:text-gray-600">dismiss</button>
           </div>
-          <div className="text-sm whitespace-pre-wrap text-gray-800">{explanation}</div>
+          <div
+            className="text-sm text-gray-800 prose prose-sm max-w-none"
+            dangerouslySetInnerHTML={{ __html: marked.parse(explanation) }}
+          />
         </div>
       )}
 

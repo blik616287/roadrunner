@@ -125,6 +125,17 @@ test_models:
     pvc: model-phi-4-14b
     size: 10Gi
 
+# ── Authentication (OIDC) ─────────────────────────────────────────────
+# Set auth.enabled=true and provide Google OAuth credentials to enable.
+# Override at runtime:  -e auth.enabled=true -e auth.google_client_id=...
+auth:
+  enabled: false
+  google_client_id: "{{ lookup('env', 'GOOGLE_CLIENT_ID') }}"
+  google_client_secret: "{{ lookup('env', 'GOOGLE_CLIENT_SECRET') }}"
+  session_secret: "{{ lookup('env', 'GRAPHRAG_SESSION_SECRET') | default('change-me-in-prod', true) }}"
+  redirect_uri: ""
+  allowed_domain: ""
+
 # ── GraphRAG Pipeline Settings ───────────────────────────────────────
 graphrag:
   ingest_worker_replicas: 4
