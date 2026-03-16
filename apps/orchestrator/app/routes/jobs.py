@@ -136,6 +136,13 @@ async def list_jobs(
     limit: int = Query(default=10000, le=10000),
     _user: dict = Depends(get_current_user),
 ):
+    # Reconcile indexing jobs before listing
+    if _settings:
+        try:
+            await _reconcile_indexing_jobs(workspace)
+        except Exception as e:
+            logger.warning(f"Job reconciliation failed: {e}")
+
     pool = get_pool()
     conditions = []
     params = []

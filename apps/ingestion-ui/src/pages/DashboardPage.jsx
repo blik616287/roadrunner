@@ -29,6 +29,15 @@ export default function DashboardPage() {
     }
   };
 
+  const handleCreateWorkspace = () => {
+    const name = newName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+    if (name) {
+      switchWorkspace(name);
+      setNewName('');
+      navigate('/ingest');
+    }
+  };
+
   const handleDelete = async (e, name) => {
     e.stopPropagation();
     const action = name === 'default' ? 'Clear' : 'Delete';
