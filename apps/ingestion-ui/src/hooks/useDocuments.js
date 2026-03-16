@@ -9,7 +9,7 @@ export function useDocuments(workspace) {
     if (!workspace) return;
     try {
       setLoading(true);
-      const data = await listJobs(workspace, null, 200);
+      const data = await listJobs(workspace, null, 10000);
       setDocuments(data.jobs);
     } catch (e) {
       console.error('Failed to fetch documents:', e);

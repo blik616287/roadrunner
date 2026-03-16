@@ -846,30 +846,48 @@ def _patch_hot_pipeline():
                     rag.text_chunks.upsert(chunks),
                 )
 
-                # Stage 2: extract entities
-                chunk_results = await rag._process_extract_entities(
-                    chunks, pipeline_status, pipeline_status_lock
-                )
+                # Stage 2: extract entities (with timeout to prevent infinite hangs)
+                _extract_timeout = int(os.environ.get("LLM_TIMEOUT", "600"))
+                try:
+                    chunk_results = await asyncio.wait_for(
+                        rag._process_extract_entities(
+                            chunks, pipeline_status, pipeline_status_lock
+                        ),
+                        timeout=_extract_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    raise RuntimeError(
+                        f"Extraction timed out after {_extract_timeout}s for {file_path} "
+                        f"({len(chunks)} chunks)"
+                    )
 
                 # Stage 3: merge into knowledge graph
-                await merge_nodes_and_edges(
-                    chunk_results=chunk_results,
-                    knowledge_graph_inst=rag.chunk_entity_relation_graph,
-                    entity_vdb=rag.entities_vdb,
-                    relationships_vdb=rag.relationships_vdb,
-                    global_config=asdict(rag),
-                    full_entities_storage=rag.full_entities,
-                    full_relations_storage=rag.full_relations,
-                    doc_id=doc_id,
-                    pipeline_status=pipeline_status,
-                    pipeline_status_lock=pipeline_status_lock,
-                    llm_response_cache=rag.llm_response_cache,
-                    entity_chunks_storage=rag.entity_chunks,
-                    relation_chunks_storage=rag.relation_chunks,
-                    current_file_number=0,
-                    total_files=0,
-                    file_path=file_path,
-                )
+                try:
+                    await asyncio.wait_for(
+                        merge_nodes_and_edges(
+                            chunk_results=chunk_results,
+                            knowledge_graph_inst=rag.chunk_entity_relation_graph,
+                            entity_vdb=rag.entities_vdb,
+                            relationships_vdb=rag.relationships_vdb,
+                            global_config=asdict(rag),
+                            full_entities_storage=rag.full_entities,
+                            full_relations_storage=rag.full_relations,
+                            doc_id=doc_id,
+                            pipeline_status=pipeline_status,
+                            pipeline_status_lock=pipeline_status_lock,
+                            llm_response_cache=rag.llm_response_cache,
+                            entity_chunks_storage=rag.entity_chunks,
+                            relation_chunks_storage=rag.relation_chunks,
+                            current_file_number=0,
+                            total_files=0,
+                            file_path=file_path,
+                        ),
+                        timeout=_extract_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    raise RuntimeError(
+                        f"Merge timed out after {_extract_timeout}s for {file_path}"
+                    )
 
                 # Done — mark PROCESSED and flush
                 processing_end_time = int(time.time())
@@ -940,6 +958,45 @@ def _patch_hot_pipeline():
                 pipeline_status_lock = get_namespace_lock(
                     "pipeline_status", workspace=ws
                 )
+
+                # Recover stale PROCESSING docs — hard wall-clock cutoff
+                _hard_timeout = int(os.environ.get("LLM_TIMEOUT", "600"))
+                try:
+                    processing = await rag.doc_status.get_docs_by_status(DocStatus.PROCESSING)
+                    now = int(time.time())
+                    for did, sdoc in processing.items():
+                        meta = getattr(sdoc, "metadata", None) or {}
+                        start = meta.get("processing_start_time", 0)
+                        if not start:
+                            continue
+                        elapsed = now - start
+                        # Orphaned docs (no active task): fail after 1x timeout
+                        # Active docs (task exists but stuck): fail after 2x timeout
+                        threshold = _hard_timeout if did not in _launched_docs else _hard_timeout * 2
+                        if elapsed > threshold:
+                            fp = getattr(sdoc, "file_path", "unknown") or "unknown"
+                            logger.warning(
+                                f"[hot_pipeline] Force-failing stuck doc {fp} "
+                                f"(elapsed {elapsed}s, threshold {threshold}s, "
+                                f"active={'yes' if did in _launched_docs else 'no'})"
+                            )
+                            # Remove from launched set so the task slot is freed
+                            _launched_docs.discard(did)
+                            await rag.doc_status.upsert({
+                                did: {
+                                    "status": DocStatus.FAILED,
+                                    "error_msg": f"Hard timeout: stuck {elapsed}s (limit {threshold}s)",
+                                    "content_summary": sdoc.content_summary,
+                                    "content_length": sdoc.content_length,
+                                    "created_at": sdoc.created_at,
+                                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                                    "file_path": fp,
+                                    "track_id": sdoc.track_id,
+                                    "metadata": meta,
+                                }
+                            })
+                except Exception as e:
+                    logger.error(f"[hot_pipeline] Stale recovery failed (ws={ws}): {e}")
 
                 # Poll for PENDING docs only — failed docs require explicit reprocess
                 try:

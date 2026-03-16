@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { deleteDocument, deleteLightragDocs, downloadDocumentUrl } from '../api';
 import { useWorkspace } from '../hooks/useWorkspaceContext';
+import useFilter from '../hooks/useFilter';
 import useSort from '../hooks/useSort';
 import usePagination from '../hooks/usePagination';
 import JobStatusBadge from './JobStatusBadge';
 import SortHeader from './SortHeader';
+import ColumnFilter from './ColumnFilter';
 import Pagination from './Pagination';
 
 export default function DocumentTable({ documents, lightragDocs, onRefresh }) {
@@ -29,10 +31,14 @@ export default function DocumentTable({ documents, lightragDocs, onRefresh }) {
   const mergedStatus = (ingestStatus, lrDoc) => {
     if (lrDoc) {
       if (lrDoc.status === 'processed') return 'completed';
-      if (lrDoc.status === 'processing') return 'indexing';
+      if (lrDoc.status === 'processing') return 'processing';
+      if (lrDoc.status === 'pending') return 'queued';
       if (lrDoc.status === 'failed') return 'failed';
     }
-    return ingestStatus;
+    if (ingestStatus === 'indexing' || ingestStatus === 'started' || ingestStatus === 'processing') return 'processing';
+    if (ingestStatus === 'completed') return 'completed';
+    if (ingestStatus === 'failed') return 'failed';
+    return 'queued';
   };
 
   // Merge: for each orchestrator doc, find matching LightRAG doc
@@ -56,10 +62,14 @@ export default function DocumentTable({ documents, lightragDocs, onRefresh }) {
   const orphaned = [];
   for (const [fp, doc] of lrByPath) {
     if (!matchedLrPaths.has(fp)) {
+      const st = doc.status === 'processed' ? 'completed'
+        : doc.status === 'processing' ? 'processing'
+        : doc.status === 'pending' ? 'queued'
+        : doc.status === 'failed' ? 'failed' : doc.status;
       orphaned.push({
         _id: doc.id,
         fileName: doc.file_path || doc.id,
-        _status: doc.status === 'processed' ? 'completed' : doc.status,
+        _status: st,
         created_at: doc.created_at || '',
         _orphan: true,
         _lrDoc: doc,
@@ -68,7 +78,10 @@ export default function DocumentTable({ documents, lightragDocs, onRefresh }) {
   }
 
   const allRows = [...merged, ...orphaned];
-  const { sorted, sortKey, sortDir, toggle } = useSort(allRows, 'documents', 'created_at', 'desc');
+  const statusOptions = useMemo(() => [...new Set(allRows.map((r) => r._status))].sort(), [allRows]);
+
+  const { filtered, filters, setFilter, clearFilters, activeCount } = useFilter(allRows, 'documents');
+  const { sorted, sortKey, sortDir, toggle } = useSort(filtered, 'documents', 'created_at', 'desc');
   const { paged, page, pageSize, totalPages, totalItems, setPage, changePageSize, PAGE_SIZE_OPTIONS } = usePagination(sorted, 'documents');
 
   const handleDelete = async (docId) => {
@@ -108,11 +121,23 @@ export default function DocumentTable({ documents, lightragDocs, onRefresh }) {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b text-left text-gray-500">
-            <SortHeader label="File" sortKey="fileName" {...thProps} />
-            <SortHeader label="Status" sortKey="_status" {...thProps} />
+            <SortHeader label="File" sortKey="fileName" {...thProps}>
+              <ColumnFilter columnKey="fileName" value={filters.fileName} onChange={setFilter} />
+            </SortHeader>
+            <SortHeader label="Status" sortKey="_status" {...thProps}>
+              <ColumnFilter columnKey="_status" value={filters._status} options={statusOptions} onChange={setFilter} />
+            </SortHeader>
             <SortHeader label="Created" sortKey="created_at" {...thProps} />
             <th className="py-2 pr-3 font-medium">Actions</th>
           </tr>
+          {activeCount > 0 && (
+            <tr>
+              <td colSpan={4} className="py-1 text-xs text-gray-500">
+                Showing {totalItems} of {allRows.length} documents
+                <button onClick={clearFilters} className="ml-2 text-blue-600 hover:underline">Clear filters</button>
+              </td>
+            </tr>
+          )}
         </thead>
         <tbody>
           {paged.map((d) => d._orphan ? (

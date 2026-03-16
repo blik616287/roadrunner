@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
+import useFilter from '../hooks/useFilter';
 import useSort from '../hooks/useSort';
 import usePagination from '../hooks/usePagination';
 import JobStatusBadge from './JobStatusBadge';
 import SortHeader from './SortHeader';
+import ColumnFilter from './ColumnFilter';
 import Pagination from './Pagination';
 
 function formatDuration(start, end) {
@@ -38,7 +40,11 @@ export default function JobTable({ jobs, onRetry }) {
     _duration: durationMs(j.started_at, j.completed_at),
   }));
 
-  const { sorted, sortKey, sortDir, toggle } = useSort(rows, 'jobs', 'created_at', 'desc', '_file');
+  const statusOptions = useMemo(() => [...new Set(rows.map((r) => r.status))].sort(), [rows]);
+  const workspaceOptions = useMemo(() => [...new Set(rows.map((r) => r.workspace))].sort(), [rows]);
+
+  const { filtered, filters, setFilter, clearFilters, activeCount } = useFilter(rows, 'jobs');
+  const { sorted, sortKey, sortDir, toggle } = useSort(filtered, 'jobs', 'created_at', 'desc', '_file');
   const { paged, page, pageSize, totalPages, totalItems, setPage, changePageSize, PAGE_SIZE_OPTIONS } = usePagination(sorted, 'jobs');
 
   if (!jobs.length) {
@@ -53,12 +59,26 @@ export default function JobTable({ jobs, onRetry }) {
         <thead>
           <tr className="border-b text-left text-gray-500">
             <SortHeader label="Job" sortKey="job_id" {...thProps} />
-            <SortHeader label="File" sortKey="_file" {...thProps} />
-            <SortHeader label="Status" sortKey="status" {...thProps} />
-            <SortHeader label="Workspace" sortKey="workspace" {...thProps} />
+            <SortHeader label="File" sortKey="_file" {...thProps}>
+              <ColumnFilter columnKey="_file" value={filters._file} onChange={setFilter} />
+            </SortHeader>
+            <SortHeader label="Status" sortKey="status" {...thProps}>
+              <ColumnFilter columnKey="status" value={filters.status} options={statusOptions} onChange={setFilter} />
+            </SortHeader>
+            <SortHeader label="Workspace" sortKey="workspace" {...thProps}>
+              <ColumnFilter columnKey="workspace" value={filters.workspace} options={workspaceOptions} onChange={setFilter} />
+            </SortHeader>
             <SortHeader label="Created" sortKey="created_at" {...thProps} />
             <SortHeader label="Duration" sortKey="_duration" {...thProps} />
           </tr>
+          {activeCount > 0 && (
+            <tr>
+              <td colSpan={6} className="py-1 text-xs text-gray-500">
+                Showing {totalItems} of {rows.length} jobs
+                <button onClick={clearFilters} className="ml-2 text-blue-600 hover:underline">Clear filters</button>
+              </td>
+            </tr>
+          )}
         </thead>
         <tbody>
           {paged.map((j) => (

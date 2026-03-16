@@ -5,7 +5,7 @@ import signal
 
 import httpx
 import nats
-from nats.js.api import StreamConfig
+from nats.js.api import ConsumerConfig, StreamConfig
 
 from .config import Settings
 from .db import init_pool, close_pool, get_job, mark_job_started, mark_job_indexing, mark_job_completed, mark_job_failed, reset_job_queued
@@ -15,18 +15,29 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ingest-worker")
 
 STREAM_NAME = "INGEST"
-SUBJECTS = ["ingest.document", "ingest.codebase"]
+SUBJECTS = ["ingest.document", "ingest.codebase", "ingest.priority.document", "ingest.priority.codebase"]
 CONSUMER_NAME = "ingest-worker"
+PRIORITY_CONSUMER_NAME = "ingest-worker-priority"
 
 settings = Settings()
 _shutdown = asyncio.Event()
 
 
 async def setup_stream(js):
-    """Create or verify the INGEST JetStream stream."""
+    """Create or update the INGEST JetStream stream."""
     try:
         await js.find_stream_name_by_subject("ingest.>")
-        logger.info(f"Stream {STREAM_NAME} already exists")
+        # Update stream to ensure priority subjects are included
+        await js.update_stream(
+            StreamConfig(
+                name=STREAM_NAME,
+                subjects=SUBJECTS,
+                retention="workqueue",
+                max_msgs=10000,
+                storage="file",
+            )
+        )
+        logger.info(f"Stream {STREAM_NAME} updated")
     except Exception:
         await js.add_stream(
             StreamConfig(
@@ -40,7 +51,7 @@ async def setup_stream(js):
         logger.info(f"Created stream {STREAM_NAME}")
 
 
-async def _poll_track_status(track_ids: list[str], workspace: str) -> tuple[bool, bool]:
+async def _poll_track_status(track_ids: list[str], workspace: str, msg=None) -> tuple[bool, bool]:
     """Poll LightRAG track_status until all tracks complete or timeout.
 
     Returns (all_done, any_failed).
@@ -48,6 +59,9 @@ async def _poll_track_status(track_ids: list[str], workspace: str) -> tuple[bool
     deadline = asyncio.get_event_loop().time() + settings.indexing_poll_timeout
     async with httpx.AsyncClient(timeout=10.0) as client:
         while asyncio.get_event_loop().time() < deadline:
+            # Extend NATS ack deadline while we're still polling
+            if msg:
+                await msg.in_progress()
             all_done = True
             any_failed = False
             for tid in track_ids:
@@ -91,7 +105,7 @@ async def _process_and_ack(msg, job_id: str, job_type: str, job: dict):
         if track_ids:
             await mark_job_indexing(job_id, result)
             logger.info(f"Job {job_id} sent to LightRAG: {len(track_ids)} tracks, polling...")
-            done, failed = await _poll_track_status(track_ids, job["workspace"])
+            done, failed = await _poll_track_status(track_ids, job["workspace"], msg=msg)
             if done and not failed:
                 await mark_job_completed(job_id, result)
                 logger.info(f"Job {job_id} completed")
@@ -99,7 +113,8 @@ async def _process_and_ack(msg, job_id: str, job_type: str, job: dict):
                 await mark_job_failed(job_id, "LightRAG extraction failed")
                 logger.warning(f"Job {job_id} failed in LightRAG")
             else:
-                logger.warning(f"Job {job_id} poll timed out, left as indexing")
+                await mark_job_failed(job_id, "LightRAG indexing timed out")
+                logger.warning(f"Job {job_id} poll timed out, marked failed")
         else:
             await mark_job_completed(job_id, result)
             logger.info(f"Job {job_id} completed (no new docs)")
@@ -186,7 +201,9 @@ async def handle_messages(messages):
                         await mark_job_failed(jid, "LightRAG extraction failed")
                     logger.warning(f"Workspace '{workspace}' batch failed in LightRAG")
                 else:
-                    logger.warning(f"Workspace '{workspace}' batch poll timed out, left as indexing")
+                    for jid in job_ids:
+                        await mark_job_failed(jid, "LightRAG indexing timed out")
+                    logger.warning(f"Workspace '{workspace}' batch poll timed out, marked failed")
             else:
                 for jid in job_ids:
                     await mark_job_completed(jid, result)
@@ -218,18 +235,91 @@ async def run():
     await setup_stream(js)
     logger.info(f"Connected to NATS at {settings.nats_url}")
 
+    # Ensure consumers have correct filter and ack_wait (recreate if needed)
+    ack_wait_secs = 600  # 10 minutes (nats-py converts to nanoseconds internally)
+    consumer_defs = [
+        (CONSUMER_NAME, "ingest.*"),
+        (PRIORITY_CONSUMER_NAME, "ingest.priority.>"),
+    ]
+    for name, expected_filter in consumer_defs:
+        try:
+            info = await js.consumer_info(STREAM_NAME, name)
+            needs_recreate = (
+                info.config.filter_subject != expected_filter
+                or info.config.ack_wait != ack_wait_secs
+            )
+            if needs_recreate:
+                await js.delete_consumer(STREAM_NAME, name)
+                logger.info(f"Deleted consumer {name} (filter={info.config.filter_subject}, ack_wait={info.config.ack_wait})")
+        except Exception:
+            pass  # consumer doesn't exist yet
+
+    priority_sub = await js.pull_subscribe(
+        "ingest.priority.>",
+        durable=PRIORITY_CONSUMER_NAME,
+        stream=STREAM_NAME,
+        config=ConsumerConfig(ack_wait=ack_wait_secs),
+    )
+
     sub = await js.pull_subscribe(
-        "ingest.>",
+        "ingest.*",
         durable=CONSUMER_NAME,
         stream=STREAM_NAME,
+        config=ConsumerConfig(ack_wait=ack_wait_secs),
     )
 
     logger.info("Ingest worker ready, waiting for jobs...")
 
+    async def _parse_and_queue(messages):
+        """Parse messages and return list of process tasks."""
+        tasks = []
+        for msg in messages:
+            try:
+                payload = json.loads(msg.data.decode())
+                job_id = payload["job_id"]
+                job_type = payload.get("type", "document")
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.error(f"Invalid message payload: {e}")
+                await msg.term()
+                continue
+
+            job = await get_job(job_id)
+            if not job:
+                logger.error(f"Job {job_id} not found in database")
+                await msg.term()
+                continue
+            if job["status"] == "completed":
+                logger.info(f"Job {job_id} already completed, skipping")
+                await msg.ack()
+                continue
+
+            await mark_job_started(job_id)
+            tasks.append(_process_and_ack(msg, job_id, job_type, job))
+        return tasks
+
     while not _shutdown.is_set():
         try:
-            messages = await sub.fetch(batch=settings.fetch_batch, timeout=5)
-            await handle_messages(messages)
+            # Check priority queue first (short timeout)
+            tasks = []
+            try:
+                priority_msgs = await priority_sub.fetch(batch=settings.fetch_batch, timeout=1)
+                tasks = await _parse_and_queue(priority_msgs)
+                if tasks:
+                    logger.info(f"Processing {len(tasks)} priority job(s)")
+            except nats.errors.TimeoutError:
+                pass
+
+            # Fill remaining slots from regular queue
+            remaining = settings.fetch_batch - len(tasks)
+            if remaining > 0:
+                try:
+                    messages = await sub.fetch(batch=remaining, timeout=4)
+                    tasks.extend(await _parse_and_queue(messages))
+                except nats.errors.TimeoutError:
+                    pass
+
+            if tasks:
+                await asyncio.gather(*tasks)
         except nats.errors.TimeoutError:
             continue
         except Exception as e:

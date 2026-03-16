@@ -34,9 +34,9 @@ extraction:
   servedModelName: "qwen3-30b-a3b-extract"
   pvc: "model-qwen3-30b-a3b"
   port: 8000
-  maxModelLen: "8192"
-  maxNumSeqs: "8"
-  gpuMemoryUtilization: "0.35"
+  maxModelLen: "16384"
+  maxNumSeqs: "16"
+  gpuMemoryUtilization: "0.50"
 
   persistence:
     storageClass: longhorn-models
@@ -50,9 +50,9 @@ extraction:
       memory: 32Gi
       nvidia.com/gpu: "1"
 
-# -- Query LLM served by vLLM (dedicated for explain/synthesis)
+# -- Query LLM served by vLLM (GPU) — disabled in favor of cpu-query
 query:
-  enabled: true
+  enabled: false
   image: vllm/vllm-openai:nightly-aarch64
   model: "Qwen3-30B-A3B-Instruct-2507"
   modelPath: "/data/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
@@ -73,9 +73,9 @@ query:
       memory: 32Gi
       nvidia.com/gpu: "1"
 
-# -- Reranker model served by vLLM (GPU)
+# -- Reranker model served by vLLM (GPU) — disabled in favor of cpu-rerank
 reranker:
-  enabled: true
+  enabled: false
   image: vllm/vllm-openai:nightly-aarch64
   model: "BAAI/bge-reranker-v2-m3"
   port: 8000
@@ -91,6 +91,39 @@ reranker:
       memory: 8Gi
       nvidia.com/gpu: "1"
 
+# -- CPU Query LLM (llama-cpp-python, Qwen3-4B Q4_K_M)
+cpuQuery:
+  enabled: true
+  image: localhost/graphrag-cpu-query:latest
+  modelPath: "/data/Qwen3-4B-Q4_K_M.gguf"
+  pvc: "model-qwen3-4b"
+  nCtx: "8192"
+  nThreads: "8"
+  nBatch: "512"
+  persistence:
+    storageClass: longhorn-models
+    size: 5Gi
+  resources:
+    requests:
+      cpu: "4"
+      memory: 4Gi
+    limits:
+      cpu: "10"
+      memory: 8Gi
+
+# -- CPU Reranker (sentence-transformers, bge-reranker-v2-m3)
+cpuRerank:
+  enabled: true
+  image: localhost/graphrag-cpu-rerank:latest
+  pvc: "vllm-rerank-data"
+  resources:
+    requests:
+      cpu: "2"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+
 # -- LightRAG application server
 lightrag:
   enabled: true
@@ -102,7 +135,7 @@ lightrag:
     binding: openai
     model: "qwen3-30b-a3b-extract"
     host: "http://vllm-extract:8000/v1"
-    numCtx: "8192"
+    numCtx: "16384"
   # Embedding -- points to vllm-embed (pooling runner)
   embeddingConfig:
     binding: openai
@@ -116,21 +149,24 @@ lightrag:
     model: "BAAI/bge-reranker-v2-m3"
     host: "http://vllm-rerank:8000/rerank"
   llmTimeout: "600"            # LLM worker timeout in seconds (default 180, increase for larger models)
-  maxAsync: "8"                 # concurrent document processing (default 8)
+  maxAsync: "16"                # concurrent document processing (default 8)
   maxParallelInsert: "8"        # concurrent database inserts (default 4)
   # Embedding throughput tuning
   embeddingBatchNum: "32"      # chunks per embedding call (default 10)
   embeddingFuncMaxAsync: "4"   # concurrent embedding calls (default 8)
   embeddingTimeout: "60"       # embedding timeout in seconds (default 30)
+  # Chunking
+  chunkSize: "4000"            # tokens per LightRAG internal chunk (default 1200)
+  chunkOverlapSize: "100"      # token overlap between chunks
   # Pipelined embedding + extraction (workspace_patch.py)
   pipelinedEmbedding: "1"     # 1=overlap embedding with extraction, 0=sequential
   # Extraction optimization patches (workspace_patch.py)
   filetypePrompts: "1"         # 1=per-file-type extraction prompts, 0=default generic
-  llmMaxTokens: "2048"         # max_tokens cap for LLM extraction calls (0=unlimited)
+  llmMaxTokens: "512"          # max_tokens cap for LLM extraction calls (0=unlimited)
   typedRelationships: "1"      # 1=use extraction keywords as Neo4j relationship types, 0=all DIRECTED
   # Streaming pipeline (workspace_patch.py)
   hotPipeline: "1"             # 1=streaming background worker, 0=legacy batch-per-request
-  hotPipelineWorkers: "4"      # concurrent doc processing slots in streaming mode
+  hotPipelineWorkers: "16"     # concurrent doc processing slots in streaming mode
   # Storage backends
   storage:
     graph: Neo4JStorage
@@ -196,7 +232,7 @@ postgresql:
 # -- Code preprocessor (tree-sitter)
 codePreprocessor:
   enabled: true
-  image: localhost/graphrag-code-preprocessor:latest
+  image: localhost/graphrag-code-preprocessor:v3
   port: 8090
   nodePort: 31490
   replicas: 2
@@ -228,7 +264,7 @@ redis:
 # -- GraphRAG Orchestrator (ingestion API + data query)
 orchestrator:
   enabled: true
-  image: localhost/graphrag-orchestrator:latest
+  image: localhost/graphrag-orchestrator:v6
   port: 8100
   nodePort: 31800
   sessionTtlSeconds: "7200"
@@ -267,7 +303,7 @@ nats:
 # -- Ingest worker (NATS consumer for async document processing)
 ingestWorker:
   enabled: true
-  image: localhost/graphrag-ingest-worker:latest
+  image: localhost/graphrag-ingest-worker:v6
   replicas: 2
   maxRedeliveries: "3"
   ackWaitSeconds: "600"
@@ -283,7 +319,7 @@ ingestWorker:
 # -- Ingestion Management UI (React SPA + nginx)
 ingestionUi:
   enabled: true
-  image: localhost/graphrag-ingestion-ui:latest
+  image: localhost/graphrag-ingestion-ui:v4
   port: 8080
   nodePort: 31300
   resources:
@@ -302,9 +338,9 @@ queueScaler:
   burstThreshold: "10"
   hysteresisUp: "3"
   hysteresisDown: "5"
-  rerankerDeployment: "vllm-rerank"
+  rerankerDeployment: "cpu-rerank"
   rerankerNormalReplicas: 1
-  rerankerBurstReplicas: 0
+  rerankerBurstReplicas: 1
   resources:
     requests:
       cpu: "0.1"

@@ -4,9 +4,7 @@ import { WorkspaceProvider } from './hooks/useWorkspaceContext';
 import Layout from './components/Layout';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
-import IngestPage from './pages/IngestPage';
-import JobsPage from './pages/JobsPage';
-import DocumentsPage from './pages/DocumentsPage';
+import DataPage from './pages/DataPage';
 import GraphPage from './pages/GraphPage';
 import QueryPage from './pages/QueryPage';
 import AccountPage from './pages/AccountPage';
@@ -35,9 +33,7 @@ export default function App() {
             <Route element={<RequireAuth />}>
               <Route element={<Layout />}>
                 <Route index element={<DashboardPage />} />
-                <Route path="ingest" element={<IngestPage />} />
-                <Route path="jobs" element={<JobsPage />} />
-                <Route path="documents" element={<DocumentsPage />} />
+                <Route path="data" element={<DataPage />} />
                 <Route path="graph" element={<GraphPage />} />
                 <Route path="query" element={<QueryPage />} />
                 <Route path="account" element={<AccountPage />} />

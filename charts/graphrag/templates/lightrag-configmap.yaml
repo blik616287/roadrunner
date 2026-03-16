@@ -34,7 +34,11 @@ data:
   ENABLE_RERANK: "true"
   RERANK_BINDING: {{ .Values.lightrag.rerank.binding }}
   RERANK_MODEL: {{ .Values.lightrag.rerank.model }}
+  {{- if $.Values.cpuRerank.enabled }}
+  RERANK_BINDING_HOST: "http://cpu-rerank.{{ $.Values.namespace }}.svc.cluster.local:8000/rerank"
+  {{- else }}
   RERANK_BINDING_HOST: {{ .Values.lightrag.rerank.host }}
+  {{- end }}
   {{- end }}
   # Storage backends
   LIGHTRAG_KV_STORAGE: {{ .Values.lightrag.storage.kv }}
@@ -57,6 +61,9 @@ data:
   EMBEDDING_BATCH_NUM: {{ .Values.lightrag.embeddingBatchNum | default "10" | quote }}
   EMBEDDING_FUNC_MAX_ASYNC: {{ .Values.lightrag.embeddingFuncMaxAsync | default "8" | quote }}
   EMBEDDING_TIMEOUT: {{ .Values.lightrag.embeddingTimeout | default "30" | quote }}
+  # Chunking
+  CHUNK_SIZE: {{ .Values.lightrag.chunkSize | default "1200" | quote }}
+  CHUNK_OVERLAP_SIZE: {{ .Values.lightrag.chunkOverlapSize | default "100" | quote }}
   # Extraction optimization patches (workspace_patch.py)
   FILETYPE_PROMPTS: {{ .Values.lightrag.filetypePrompts | default "0" | quote }}
   LLM_MAX_TOKENS: {{ .Values.lightrag.llmMaxTokens | default "0" | quote }}

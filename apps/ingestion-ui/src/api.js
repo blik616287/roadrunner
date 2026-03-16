@@ -32,7 +32,7 @@ export const deleteWorkspace = (workspace) =>
   request(`${API}/v1/workspaces/${encodeURIComponent(workspace)}`, { method: 'DELETE' });
 
 // Jobs
-export const listJobs = (workspace, status, limit = 50) => {
+export const listJobs = (workspace, status, limit = 10000) => {
   const p = new URLSearchParams();
   if (workspace) p.set('workspace', workspace);
   if (status) p.set('status', status);
@@ -44,6 +44,9 @@ export const getJob = (jobId) => request(`${API}/v1/jobs/${jobId}`);
 
 export const retryJob = (jobId) =>
   request(`${API}/v1/jobs/${jobId}/retry`, { method: 'POST' });
+
+export const prioritizeJob = (jobId) =>
+  request(`${API}/v1/jobs/${jobId}/prioritize`, { method: 'POST' });
 
 export const retryFailedJobs = (workspace) =>
   request(`${API}/v1/jobs/retry-failed?workspace=${encodeURIComponent(workspace)}`, { method: 'POST' });
@@ -159,6 +162,9 @@ export const reconcileGraph = (workspace) =>
   });
 
 // Graph
+export const getTopGraph = (workspace, limit = 2000) =>
+  request(`${API}/v1/graph/top?workspace=${encodeURIComponent(workspace)}&limit=${limit}`);
+
 export const getGraphLabels = (workspace) =>
   request(`${LIGHTRAG}/graph/label/list`, {
     headers: { 'LIGHTRAG-WORKSPACE': workspace },

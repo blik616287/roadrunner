@@ -30,8 +30,20 @@ models:
     namespace: graphrag
     pvc: model-qwen3-30b-a3b
     size: 25Gi
-    num_ctx: "8192"
+    num_ctx: "16384"
     served_model_name: "qwen3-30b-a3b-extract"
+
+  query_cpu:
+    name: "qwen3-4b"
+    tag: "Qwen/Qwen3-4B"
+    source: gguf
+    gguf_repo: "unsloth/Qwen3-4B-GGUF"
+    gguf_file: "Qwen3-4B-Q4_K_M.gguf"
+    tokenizer: "Qwen/Qwen3-4B"
+    quant: "Q4_K_M"
+    namespace: graphrag
+    pvc: model-qwen3-4b
+    size: 5Gi
 
   embed:
     name: "qwen3-embedding"

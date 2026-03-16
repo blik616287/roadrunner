@@ -117,7 +117,7 @@ def _format_context_numbered(data: dict, sources: list[dict]) -> str:
     entities = data.get("entities", [])
     if entities:
         lines = []
-        for e in entities[:30]:
+        for e in entities[:15]:
             name = e.get("entity_name", "?")
             etype = e.get("entity_type", "?")
             desc = e.get("description", "")
@@ -130,7 +130,7 @@ def _format_context_numbered(data: dict, sources: list[dict]) -> str:
     relations = data.get("relations", [])
     if relations:
         lines = []
-        for r in relations[:20]:
+        for r in relations[:10]:
             src = r.get("src_id", "?")
             tgt = r.get("tgt_id", "?")
             desc = r.get("description", "relates to")
@@ -194,6 +194,7 @@ async def data_explain(
                 "provide a clear, well-structured answer to the user's question. "
                 "Reference specific entities, relationships, and code when relevant."
                 + source_refs
+                + "\n/no_think"
             ),
         },
         {
@@ -205,6 +206,7 @@ async def data_explain(
     footer = _format_sources_footer(sources)
 
     async def stream_response():
+        in_think = False
         try:
             async with _http_client.stream(
                 "POST",
@@ -212,16 +214,34 @@ async def data_explain(
                 json={
                     "model": _settings.query_llm_model,
                     "messages": messages,
-                    "max_tokens": 2048,
+                    "max_tokens": 512,
                     "temperature": 0.7,
                     "stream": True,
                 },
-                timeout=60.0,
+                timeout=300.0,
             ) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
-                    if line.startswith("data: "):
-                        yield line + "\n\n"
+                    if not line.startswith("data: "):
+                        continue
+                    # Strip <think>...</think> blocks from Qwen3 models
+                    payload = line[6:].strip()
+                    if payload and payload[0] == "{":
+                        try:
+                            import json as _j
+                            chunk = _j.loads(payload)
+                            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if "<think>" in content:
+                                in_think = True
+                                continue
+                            if "</think>" in content:
+                                in_think = False
+                                continue
+                            if in_think:
+                                continue
+                        except Exception:
+                            pass
+                    yield line + "\n\n"
         except Exception as e:
             logger.error(f"Explain LLM stream failed: {e}")
             yield f"data: [Error: {e}]\n\n"

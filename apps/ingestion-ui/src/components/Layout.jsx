@@ -4,9 +4,7 @@ import { useAuth } from '../hooks/useAuth';
 
 const nav = [
   { to: '/', label: 'Dashboard' },
-  { to: '/ingest', label: 'Ingest' },
-  { to: '/jobs', label: 'Jobs' },
-  { to: '/documents', label: 'Documents' },
+  { to: '/data', label: 'Data' },
   { to: '/graph', label: 'Graph' },
   { to: '/query', label: 'Query' },
   { to: '/account', label: 'Account' },

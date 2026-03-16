@@ -22,6 +22,6 @@ class Settings(BaseSettings):
     max_redeliveries: int = 3
     ack_wait_seconds: int = 600
     batch_size: int = 20
-    fetch_batch: int = 1  # NATS messages per worker (1 = max 4 in-flight with 4 replicas)
+    fetch_batch: int = 1  # NATS messages per worker (1 x 4 replicas = 4 concurrent)
     indexing_poll_interval: int = 3  # seconds between track_status polls
-    indexing_poll_timeout: int = 300  # max seconds to wait for LightRAG processing
+    indexing_poll_timeout: int = 1800  # max seconds to wait for LightRAG processing

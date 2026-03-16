@@ -15,7 +15,15 @@ const FILTERS = [
 
 export default function JobsPage() {
   const { workspace } = useWorkspace();
-  const [statusFilter, setStatusFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(() => {
+    const stored = localStorage.getItem('jobsStatusFilter');
+    return stored ? JSON.parse(stored) : null;
+  });
+
+  const handleStatusFilter = (value) => {
+    setStatusFilter(value);
+    localStorage.setItem('jobsStatusFilter', JSON.stringify(value));
+  };
   const { jobs, loading, refresh } = useJobs(workspace, statusFilter);
   const [retrying, setRetrying] = useState(false);
 
@@ -63,7 +71,7 @@ export default function JobsPage() {
         {FILTERS.map((f) => (
           <button
             key={f.label}
-            onClick={() => setStatusFilter(f.value)}
+            onClick={() => handleStatusFilter(f.value)}
             className={`px-3 py-1.5 rounded text-sm ${
               statusFilter === f.value
                 ? 'bg-gray-900 text-white'

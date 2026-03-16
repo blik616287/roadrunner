@@ -1,6 +1,7 @@
 import gzip
 import hashlib
 import logging
+import os
 import uuid
 
 import httpx
@@ -18,6 +19,83 @@ logger = logging.getLogger("orchestrator.documents")
 router = APIRouter()
 _settings: Settings | None = None
 
+# Supported file extensions for ingestion
+SUPPORTED_EXTENSIONS = {
+    # Code (tree-sitter)
+    ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".go", ".rs", ".java", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx",
+    # Documents
+    ".pdf", ".md", ".txt", ".rst", ".html", ".htm",
+    # YAML
+    ".yaml", ".yml",
+    # Config
+    ".ini", ".toml", ".cfg", ".conf", ".env", ".properties",
+    # JSON
+    ".json", ".jsonl", ".jsonc",
+    # Shell
+    ".sh", ".bash", ".zsh", ".fish",
+}
+
+# Archive extensions (allowed for codebase ingest only)
+ARCHIVE_EXTENSIONS = {".tar.gz", ".tgz", ".zip", ".tar.bz2", ".tar.xz", ".tar"}
+
+
+def _is_supported_file(filename: str) -> bool:
+    """Check if a filename has a supported extension."""
+    name = filename.lower()
+    # Check multi-part extensions first (e.g. .tar.gz)
+    for ext in ARCHIVE_EXTENSIONS:
+        if name.endswith(ext):
+            return False  # archives not allowed for single-file ingest
+    _, ext = os.path.splitext(name)
+    return ext in SUPPORTED_EXTENSIONS
+
+
+def _is_archive(filename: str) -> bool:
+    """Check if a filename is a supported archive."""
+    name = filename.lower()
+    for ext in ARCHIVE_EXTENSIONS:
+        if name.endswith(ext):
+            return True
+    return False
+
+
+MAX_CHARS_PER_CHUNK = 4000  # files larger than this get split into separate jobs
+
+
+def _chunk_content(content: bytes) -> list[tuple[bytes, str]]:
+    """Split large text files into chunks at line boundaries.
+
+    Returns list of (chunk_bytes, suffix) tuples.
+    If the file is small enough or binary, returns [(content, "")].
+    """
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return [(content, "")]
+
+    if len(text) <= MAX_CHARS_PER_CHUNK:
+        return [(content, "")]
+
+    chunks = []
+    lines = text.split("\n")
+    current = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current_len + line_len > MAX_CHARS_PER_CHUNK and current:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+
+    total = len(chunks)
+    return [(c.encode("utf-8"), f" (part {i+1}/{total})") for i, c in enumerate(chunks)]
+
 
 def init_documents(settings: Settings):
     global _settings
@@ -30,56 +108,85 @@ async def ingest_document(
     x_workspace: str = Header(default="default"),
     _user: dict = Depends(get_current_user),
 ):
-    content = await file.read()
-    job_id = str(uuid.uuid4())
     file_name = file.filename or "unknown"
+    if not _is_supported_file(file_name):
+        _, ext = os.path.splitext(file_name.lower())
+        raise HTTPException(
+            422,
+            f"Unsupported file type '{ext or 'none'}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
+        )
+
+    content = await file.read()
     workspace = x_workspace
-    content_hash = hashlib.sha256(content).hexdigest()
-
-    compressed = gzip.compress(content)
-
     pool = get_pool()
 
-    # Dedup by content hash — same content in same workspace reuses existing doc
-    row = await pool.fetchrow(
-        "SELECT id FROM orchestrator_documents WHERE workspace = $1 AND content_hash = $2",
-        workspace, content_hash,
-    )
-    if row:
-        doc_id = row["id"]
-        await pool.execute(
-            """UPDATE orchestrator_documents
-               SET file_name = $1, content_type = $2, created_at = now()
-               WHERE id = $3""",
-            file_name, file.content_type, doc_id,
-        )
-    else:
-        doc_id = str(uuid.uuid4())
-        await pool.execute(
-            """INSERT INTO orchestrator_documents
-               (id, workspace, file_name, content_type, compressed_blob, original_size, content_hash)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-            doc_id, workspace, file_name, file.content_type, compressed, len(content), content_hash,
-        )
+    chunks = _chunk_content(content)
+    if len(chunks) > 1:
+        logger.info(f"{file_name}: {len(content)} bytes -> {len(chunks)} chunk jobs")
 
-    # Create job record
-    await pool.execute(
-        """INSERT INTO orchestrator_ingest_jobs
-           (id, doc_id, workspace, job_type, status)
-           VALUES ($1, $2, $3, $4, $5)""",
-        job_id, doc_id, workspace, "document", "queued",
-    )
+    first_doc_id = None
+    first_job_id = None
+    for chunk_bytes, suffix in chunks:
+        chunk_name = f"{file_name}{suffix}" if suffix else file_name
+        content_hash = hashlib.sha256(chunk_bytes).hexdigest()
+        compressed = gzip.compress(chunk_bytes)
 
-    # Publish to NATS
-    await publish_ingest_job(job_id, "document")
+        # Dedup by content hash
+        row = await pool.fetchrow(
+            "SELECT id FROM orchestrator_documents WHERE workspace = $1 AND content_hash = $2",
+            workspace, content_hash,
+        )
+        if row:
+            doc_id = row["id"]
+            await pool.execute(
+                """UPDATE orchestrator_documents
+                   SET file_name = $1, content_type = $2, created_at = now()
+                   WHERE id = $3""",
+                chunk_name, file.content_type, doc_id,
+            )
+        else:
+            doc_id = str(uuid.uuid4())
+            await pool.execute(
+                """INSERT INTO orchestrator_documents
+                   (id, workspace, file_name, content_type, compressed_blob, original_size, content_hash)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                doc_id, workspace, chunk_name, file.content_type, compressed, len(chunk_bytes), content_hash,
+            )
+
+        if first_doc_id is None:
+            first_doc_id = doc_id
+
+        # Skip if an active job already exists for this document
+        active = await pool.fetchval(
+            """SELECT id FROM orchestrator_ingest_jobs
+               WHERE doc_id = $1 AND status IN ('queued', 'indexing')
+               LIMIT 1""",
+            doc_id,
+        )
+        if active:
+            if first_job_id is None:
+                first_job_id = active
+            continue
+
+        job_id = str(uuid.uuid4())
+        if first_job_id is None:
+            first_job_id = job_id
+
+        await pool.execute(
+            """INSERT INTO orchestrator_ingest_jobs
+               (id, doc_id, workspace, job_type, status)
+               VALUES ($1, $2, $3, $4, $5)""",
+            job_id, doc_id, workspace, "document", "queued",
+        )
+        await publish_ingest_job(job_id, "document")
 
     return DocumentIngestResponse(
-        doc_id=doc_id,
-        job_id=job_id,
+        doc_id=first_doc_id,
+        job_id=first_job_id,
         file_name=file_name,
         workspace=workspace,
         original_size=len(content),
-        compressed_size=len(compressed),
+        compressed_size=sum(len(gzip.compress(c)) for c, _ in chunks),
         status="queued",
     )
 
@@ -209,6 +316,24 @@ async def ingest_codebase(
             file.content_type or "application/gzip",
             compressed, len(archive_bytes),
             '{"type": "codebase"}', content_hash,
+        )
+
+    # Skip if an active job already exists for this document
+    active = await pool.fetchval(
+        """SELECT id FROM orchestrator_ingest_jobs
+           WHERE doc_id = $1 AND status IN ('queued', 'indexing')
+           LIMIT 1""",
+        doc_id,
+    )
+    if active:
+        return CodebaseIngestResponse(
+            doc_id=doc_id,
+            job_id=active,
+            workspace=workspace,
+            archive_name=archive_name,
+            original_size=len(archive_bytes),
+            compressed_size=len(compressed),
+            status="queued",
         )
 
     # Create job record

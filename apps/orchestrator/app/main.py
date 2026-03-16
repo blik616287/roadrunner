@@ -15,7 +15,7 @@ from .services import (
     nats_client,
     reconcile,
 )
-from .routes import auth, chat, models_list, documents, sessions, jobs, workspaces, data_query, internal
+from .routes import auth, chat, models_list, documents, sessions, jobs, workspaces, data_query, graph, internal
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orchestrator")
@@ -58,6 +58,7 @@ async def lifespan(app: FastAPI):
     documents.init_documents(settings)
     workspaces.init_workspaces(settings)
     jobs.init_jobs(settings)
+    graph.init_graph(settings)
     reconcile.init_reconcile(settings, _http_client)
 
     logger.info("GraphRAG Orchestrator ready")
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down GraphRAG Orchestrator...")
     reconcile.close_reconcile()
+    await graph.close_graph()
     await nats_client.close_nats()
     await _http_client.aclose()
     await working_memory.close_redis()
@@ -87,6 +89,7 @@ app.include_router(sessions.router)
 app.include_router(jobs.router)
 app.include_router(workspaces.router)
 app.include_router(data_query.router)
+app.include_router(graph.router)
 app.include_router(internal.router)
 
 

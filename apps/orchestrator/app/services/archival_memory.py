@@ -33,7 +33,7 @@ async def query(
             f"{_lightrag_url}/query/data",
             json=payload,
             headers={"LIGHTRAG-WORKSPACE": workspace},
-            timeout=30.0,
+            timeout=300.0,
         )
         if resp.status_code == 200:
             payload = resp.json()
@@ -53,9 +53,9 @@ async def query(
 
 def format_context(
     data: dict,
-    max_entities: int = 30,
-    max_relations: int = 20,
-    max_chunks: int = 5,
+    max_entities: int = 15,
+    max_relations: int = 10,
+    max_chunks: int = 3,
 ) -> str:
     """Format raw graph data into structured context for a coding LLM."""
     parts = []

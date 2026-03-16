@@ -71,6 +71,30 @@
       when: ingestion_ui_image_check.rc != 0
       timeout: 600
 
+    # ── Build cpu-query image ──────────────────────────────────
+    - name: Check if cpu-query image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-cpu-query | grep -q .
+      register: cpu_query_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build cpu-query image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-cpu-query:latest {{ apps_dir }}/cpu-query/
+      when: cpu_query_image_check.rc != 0
+      timeout: 900
+
+    # ── Build cpu-rerank image ──────────────────────────────────
+    - name: Check if cpu-rerank image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-cpu-rerank | grep -q .
+      register: cpu_rerank_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build cpu-rerank image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-cpu-rerank:latest {{ apps_dir }}/cpu-rerank/
+      when: cpu_rerank_image_check.rc != 0
+      timeout: 900
+
     # ── Build queue-scaler image ──────────────────────────────────
     - name: Check if queue-scaler image exists in containerd
       shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-queue-scaler | grep -q .
@@ -165,17 +189,17 @@
     # Solution: start the largest consumer first, wait for it to settle,
     # then proceed to the next.
 
-    - name: Scale down all vLLM deployments
+    - name: Scale down GPU vLLM deployments
       become: true
       become_user: "{{ local_user }}"
       shell: |
         kubectl -n graphrag scale deploy/vllm-extract --replicas=0 2>/dev/null || true
-        kubectl -n graphrag scale deploy/vllm-query --replicas=0 2>/dev/null || true
         kubectl -n graphrag scale deploy/vllm-embed --replicas=0 2>/dev/null || true
+        kubectl -n graphrag scale deploy/vllm-query --replicas=0 2>/dev/null || true
         kubectl -n graphrag scale deploy/vllm-rerank --replicas=0 2>/dev/null || true
         sleep 5
 
-    - name: "Start vllm-extract (largest allocation, start first)"
+    - name: "Start vllm-extract (largest GPU allocation, start first)"
       become: true
       become_user: "{{ local_user }}"
       shell: kubectl -n graphrag scale deploy/vllm-extract --replicas=1
@@ -189,26 +213,10 @@
       register: extract_ready
       until: extract_ready.rc == 0
 
-    - name: "Start vllm-query (second largest allocation)"
+    - name: "Start vllm-embed (small GPU allocation)"
       become: true
       become_user: "{{ local_user }}"
-      shell: kubectl -n graphrag scale deploy/vllm-query --replicas=1
-
-    - name: Wait for vllm-query to be ready
-      become: true
-      become_user: "{{ local_user }}"
-      shell: kubectl -n graphrag wait --for=condition=Ready pod -l app=vllm-query --timeout=600s
-      retries: 2
-      delay: 15
-      register: query_ready
-      until: query_ready.rc == 0
-
-    - name: "Start vllm-embed and vllm-rerank (small allocations, safe in parallel)"
-      become: true
-      become_user: "{{ local_user }}"
-      shell: |
-        kubectl -n graphrag scale deploy/vllm-embed --replicas=1
-        kubectl -n graphrag scale deploy/vllm-rerank --replicas=1
+      shell: kubectl -n graphrag scale deploy/vllm-embed --replicas=1
 
     - name: Wait for vllm-embed to be ready
       become: true
@@ -219,15 +227,6 @@
       register: embed_ready
       until: embed_ready.rc == 0
 
-    - name: Wait for vllm-rerank to be ready
-      become: true
-      become_user: "{{ local_user }}"
-      shell: kubectl -n graphrag wait --for=condition=Ready pod -l app=vllm-rerank --timeout=300s
-      retries: 3
-      delay: 15
-      register: rerank_ready
-      until: rerank_ready.rc == 0
-
     # ── Wait for application pods ────────────────────────────────
     - name: Wait for application pods
       become: true
@@ -235,6 +234,8 @@
       shell: |
         kubectl -n graphrag wait --for=condition=Ready pod -l app={{ item }} --timeout=300s
       loop:
+        - cpu-query
+        - cpu-rerank
         - lightrag
         - code-preprocessor
         - orchestrator

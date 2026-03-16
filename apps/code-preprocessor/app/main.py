@@ -15,6 +15,7 @@ logger = logging.getLogger("code-preprocessor")
 app = FastAPI(title="Code Preprocessor", version="0.1.0")
 
 LIGHTRAG_URL = os.environ.get("LIGHTRAG_URL", "http://lightrag:9621")
+MAX_CHARS_PER_CHUNK = int(os.environ.get("MAX_CHARS_PER_CHUNK", "4000"))
 
 # File extensions handled by tree-sitter
 CODE_EXTENSIONS = {
@@ -90,26 +91,54 @@ async def ingest(
     documents_sent = 0
     track_ids: list[TrackInfo] = []
 
+    def _chunk_text(text: str) -> list[str]:
+        """Split text into chunks at line boundaries if it exceeds MAX_CHARS_PER_CHUNK."""
+        if len(text) <= MAX_CHARS_PER_CHUNK:
+            return [text]
+        chunks = []
+        lines = text.split("\n")
+        current = []
+        current_len = 0
+        for line in lines:
+            line_len = len(line) + 1  # +1 for newline
+            if current_len + line_len > MAX_CHARS_PER_CHUNK and current:
+                chunks.append("\n".join(current))
+                current = [line]
+                current_len = line_len
+            else:
+                current.append(line)
+                current_len += line_len
+        if current:
+            chunks.append("\n".join(current))
+        return chunks
+
     async def _send_text(client, text: str, file_source: str, filetype: str = "text"):
         """Send text to LightRAG and capture track_id.
 
         Prepends a <!-- filetype:xxx --> marker so the extraction prompt
         patch can detect the file type at extraction time (which runs
         asynchronously, after the HTTP request context is gone).
+
+        Large documents are split into chunks to avoid extraction timeouts.
         """
         nonlocal documents_sent
-        tagged_text = f"<!-- filetype:{filetype} -->\n{text}"
-        resp = await client.post(
-            f"{LIGHTRAG_URL}/documents/text",
-            json={"text": tagged_text, "file_source": file_source},
-            headers={"LIGHTRAG-WORKSPACE": x_workspace},
-        )
-        resp.raise_for_status()
-        documents_sent += 1
-        data = resp.json()
-        tid = data.get("track_id", "")
-        if tid and data.get("status") != "duplicated":
-            track_ids.append(TrackInfo(track_id=tid, file_source=file_source))
+        chunks = _chunk_text(text)
+        if len(chunks) > 1:
+            logger.info(f"{file_source}: {len(text)} chars -> {len(chunks)} chunks")
+        for ci, chunk in enumerate(chunks):
+            label = f"{file_source} (part {ci+1}/{len(chunks)})" if len(chunks) > 1 else file_source
+            tagged_text = f"<!-- filetype:{filetype} -->\n{chunk}"
+            resp = await client.post(
+                f"{LIGHTRAG_URL}/documents/text",
+                json={"text": tagged_text, "file_source": label},
+                headers={"LIGHTRAG-WORKSPACE": x_workspace},
+            )
+            resp.raise_for_status()
+            documents_sent += 1
+            data = resp.json()
+            tid = data.get("track_id", "")
+            if tid and data.get("status") != "duplicated":
+                track_ids.append(TrackInfo(track_id=tid, file_source=file_source))
 
     async with httpx.AsyncClient(timeout=300) as client:
         for f in files:

@@ -16,13 +16,21 @@ _SKIP_DIRS = {
     ".tox", ".venv", "venv", ".mypy_cache", ".pytest_cache",
     "dist", "build", ".next", "target",
 }
-_SKIP_EXTENSIONS = {
-    ".pyc", ".pyo", ".so", ".dylib", ".dll", ".o", ".a",
-    ".class", ".jar", ".war", ".exe", ".bin",
-    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".bmp",
-    ".woff", ".woff2", ".ttf", ".eot",
-    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
-    ".lock", ".map",
+# Allowlist: only these extensions are ingested
+_SUPPORTED_EXTENSIONS = {
+    # Code (tree-sitter)
+    ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".go", ".rs", ".java", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx",
+    # Documents
+    ".pdf", ".md", ".txt", ".rst", ".html", ".htm",
+    # YAML
+    ".yaml", ".yml",
+    # Config
+    ".ini", ".toml", ".cfg", ".conf", ".env", ".properties",
+    # JSON
+    ".json", ".jsonl", ".jsonc",
+    # Shell
+    ".sh", ".bash", ".zsh", ".fish",
 }
 _MAX_FILE_SIZE = 1024 * 1024  # 1MB per file
 _MAX_FILES = 2000
@@ -153,7 +161,7 @@ def _should_skip(path: str, size: int) -> bool:
     if any(p in _SKIP_DIRS for p in parts):
         return True
     ext = PurePosixPath(path).suffix.lower()
-    if ext in _SKIP_EXTENSIONS:
+    if ext not in _SUPPORTED_EXTENSIONS:
         return True
     if size > _MAX_FILE_SIZE:
         return True

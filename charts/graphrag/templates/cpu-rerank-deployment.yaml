@@ -1,0 +1,73 @@
+{{- if .Values.cpuRerank.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cpu-rerank
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: cpu-rerank
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cpu-rerank
+  template:
+    metadata:
+      labels:
+        app: cpu-rerank
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      containers:
+        - name: rerank
+          image: {{ .Values.cpuRerank.image }}
+          imagePullPolicy: Never
+          env:
+            - name: MODEL_PATH
+              value: /data
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            {{- toYaml .Values.cpuRerank.resources | nindent 12 }}
+          volumeMounts:
+            - name: model-data
+              mountPath: /data
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            failureThreshold: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: model-data
+          persistentVolumeClaim:
+            claimName: {{ .Values.cpuRerank.pvc }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cpu-rerank
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: cpu-rerank
+spec:
+  selector:
+    app: cpu-rerank
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+{{- end }}

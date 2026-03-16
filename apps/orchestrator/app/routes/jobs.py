@@ -133,7 +133,7 @@ async def get_job_status(job_id: str, _user: dict = Depends(get_current_user)):
 async def list_jobs(
     workspace: str = Query(default=None),
     status: str = Query(default=None),
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=10000, le=10000),
     _user: dict = Depends(get_current_user),
 ):
     # Reconcile indexing jobs before listing
@@ -186,6 +186,22 @@ async def list_jobs(
         ],
         "count": len(rows),
     }
+
+
+@router.post("/v1/jobs/{job_id}/prioritize")
+async def prioritize_job(job_id: str, _user: dict = Depends(get_current_user)):
+    """Move a queued job to the priority queue so it gets processed next."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, job_type, status FROM orchestrator_ingest_jobs WHERE id = $1", job_id
+    )
+    if not row:
+        raise HTTPException(404, f"Job {job_id} not found")
+    if row["status"] != "queued":
+        raise HTTPException(400, f"Job {job_id} is {row['status']}, only queued jobs can be prioritized")
+
+    await publish_ingest_job(job_id, row["job_type"], priority=True)
+    return {"prioritized": job_id}
 
 
 @router.post("/v1/jobs/{job_id}/retry")
