@@ -6,7 +6,11 @@ import GraphViewer from '../components/GraphViewer';
 
 export default function GraphPage() {
   const { workspace } = useWorkspace();
-  const { graphData, loading, error, fetchGraph, fetchFullGraph } = useGraph(workspace);
+  const [nodeLimit, setNodeLimit] = useState(2000);
+  const {
+    graphData, loading, error, truncated, totalCount,
+    totalNodes, totalEdges, fetchGraph, fetchFullGraph,
+  } = useGraph(workspace, nodeLimit);
   const [query, setQuery] = useState('');
   const [selectedNode, setSelectedNode] = useState(null);
   const [reconciling, setReconciling] = useState(false);
@@ -40,7 +44,7 @@ export default function GraphPage() {
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Filter graph by query..."
+          placeholder="Search graph by query..."
           className="flex-1 border rounded px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
         />
         <button
@@ -48,7 +52,7 @@ export default function GraphPage() {
           disabled={loading || !query.trim()}
           className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700 disabled:opacity-50"
         >
-          {loading ? 'Loading...' : 'Filter'}
+          {loading ? 'Loading...' : 'Search'}
         </button>
         <button
           type="button"
@@ -68,6 +72,24 @@ export default function GraphPage() {
         </button>
       </form>
 
+      <div className="flex items-center gap-3 mb-4">
+        <label className="text-sm text-gray-500 whitespace-nowrap">Nodes: {nodeLimit.toLocaleString()}</label>
+        <input
+          type="range"
+          min={50}
+          max={2000}
+          step={50}
+          value={nodeLimit}
+          onChange={(e) => setNodeLimit(Number(e.target.value))}
+          className="flex-1 max-w-xs"
+        />
+        {totalNodes > 0 && (
+          <span className="text-sm text-gray-500 ml-4">
+            Total: {totalNodes.toLocaleString()} entities, {totalEdges.toLocaleString()} relations
+          </span>
+        )}
+      </div>
+
       {reconcileResult && (
         <div className={`border rounded p-3 text-sm mb-4 ${reconcileResult.error ? 'bg-red-50 border-red-200 text-red-700' : 'bg-orange-50 border-orange-200 text-orange-800'}`}>
           {reconcileResult.error
@@ -79,6 +101,12 @@ export default function GraphPage() {
 
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 rounded p-3 text-sm mb-4">{error}</div>
+      )}
+
+      {truncated && (
+        <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded p-3 text-sm mb-4">
+          Showing top {nodeLimit.toLocaleString()} entities by degree out of {totalCount.toLocaleString()} total. Use the slider or search to explore.
+        </div>
       )}
 
       <div className="relative">
@@ -105,6 +133,7 @@ export default function GraphPage() {
 
       <p className="text-xs text-gray-400 mt-2">
         {graphData.nodes.length} entities, {graphData.links.length} relations
+        {truncated && ` (of ${totalCount.toLocaleString()} total)`}
       </p>
     </div>
   );

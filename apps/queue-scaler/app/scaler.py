@@ -24,11 +24,13 @@ async def get_pending_count(nats_monitor_url: str, http: httpx.AsyncClient) -> i
         )
         resp.raise_for_status()
         data = resp.json()
-        streams = data.get("streams", [])
-        if not streams:
-            state = data.get("state", {})
-            return state.get("messages", 0)
-        return streams[0].get("state", {}).get("messages", 0)
+        # Stream detail is nested under account_details[].stream_detail[]
+        for acct in data.get("account_details", []):
+            for sd in acct.get("stream_detail", []):
+                if sd.get("name") == "INGEST":
+                    return sd.get("state", {}).get("messages", 0)
+        # Fallback: top-level messages count
+        return data.get("messages", 0)
     except Exception as e:
         logger.warning(f"Failed to get NATS pending count: {e}")
         return 0

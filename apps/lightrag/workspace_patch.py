@@ -19,6 +19,7 @@ Usage: Set as the Docker entrypoint instead of `lightrag-server`.
 """
 
 import contextvars
+import logging
 import os
 import sys
 
@@ -83,7 +84,17 @@ def _add_middleware(app):
             if ws not in _initialized_workspaces:
                 await initialize_pipeline_status(workspace=ws)
                 _initialized_workspaces.add(ws)
-            return await call_next(request)
+
+            response = await call_next(request)
+
+            # Signal hot pipeline for reprocess_failed — the background task
+            # loses the workspace contextvar, so we signal synchronously here.
+            if (request.url.path.endswith('/reprocess_failed')
+                    and request.method == 'POST'
+                    and hasattr(_patch_hot_pipeline, '_signal')):
+                _patch_hot_pipeline._signal(ws)
+
+            return response
 
     app.add_middleware(WorkspaceMiddleware)
 
@@ -705,6 +716,361 @@ def _patch_pipelined_embedding():
     logger.info("[pipeline] Pipelined embedding+extraction patch installed")
 
 
+_global_cache_cls = None
+
+
+def _make_cache_global(cache_instance):
+    """Override workspace on a PGKVStorage instance to always use '__global__'.
+
+    This makes the LLM response cache shared across all workspaces so
+    extraction results computed for one workspace are reused everywhere.
+    """
+    global _global_cache_cls
+    if _global_cache_cls is None:
+        class _GlobalPGKVStorage(type(cache_instance)):
+            @property
+            def workspace(self):
+                return "__global__"
+
+            @workspace.setter
+            def workspace(self, value):
+                pass  # ignore — always global
+
+        _global_cache_cls = _GlobalPGKVStorage
+    cache_instance.__class__ = _global_cache_cls
+    logging.getLogger("lightrag.global_cache").info("LLM response cache set to global (workspace='__global__')")
+
+
+def _patch_hot_pipeline():
+    """Streaming pipeline — docs flow through continuously, no batch restarts.
+
+    Replaces the batch-oriented apipeline_process_enqueue_documents with a
+    persistent background worker pool. Each /documents/text call just enqueues
+    the doc (PENDING in PostgreSQL) and signals the worker. Workers pull the
+    next PENDING doc the instant they finish the current one.
+
+    No busy lock, no accumulation window, no batch boundaries.
+
+    Activated when HOT_PIPELINE=1 env var is set (default: enabled).
+    Env vars:
+        HOT_PIPELINE_WORKERS — concurrent doc processing slots (default: 4)
+    """
+    if os.getenv("HOT_PIPELINE", "1") != "1":
+        return
+
+    import asyncio
+    import inspect
+    import logging
+    import time
+    import traceback
+    from dataclasses import asdict
+    from datetime import datetime, timezone
+
+    from lightrag import LightRAG
+    from lightrag.base import DocStatus
+    from lightrag.operate import merge_nodes_and_edges
+    from lightrag.utils import compute_mdhash_id
+    from lightrag.kg.shared_storage import get_namespace_data, get_namespace_lock
+
+    logger = logging.getLogger("lightrag.hot_pipeline")
+    _max_workers = int(os.getenv("HOT_PIPELINE_WORKERS", "4"))
+
+    _work_event = asyncio.Event()
+    _pending_workspaces: set[str] = set()
+    _launched_docs: set[str] = set()  # prevent double-launch
+    _loop_started = False
+    _rag_ref = [None]  # store rag instance for middleware use
+
+    async def _signaling_process(self, *args, **kwargs):
+        """Drop-in replacement: just signal the streaming worker."""
+        nonlocal _loop_started
+        _rag_ref[0] = self
+        ws = _current_workspace.get()
+        logger.info(f"[hot_pipeline] Signaled workspace '{ws}'")
+        _pending_workspaces.add(ws)
+        _work_event.set()
+        if not _loop_started:
+            _loop_started = True
+            asyncio.create_task(_streaming_loop(self))
+
+    async def _process_doc(rag, doc_id, status_doc, pipeline_status, pipeline_status_lock, semaphore):
+        """Process a single document through the full pipeline."""
+        async with semaphore:
+            file_path = getattr(status_doc, "file_path", "unknown_source") or "unknown_source"
+            processing_start_time = int(time.time())
+            try:
+                # Get content
+                content_data = await rag.full_docs.get_by_id(doc_id)
+                if not content_data:
+                    raise Exception(f"Document {doc_id} not found in full_docs")
+                content = content_data["content"]
+
+                # Chunk
+                chunking_result = rag.chunking_func(
+                    rag.tokenizer, content, None, False,
+                    rag.chunk_overlap_token_size, rag.chunk_token_size,
+                )
+                if inspect.isawaitable(chunking_result):
+                    chunking_result = await chunking_result
+
+                chunks = {
+                    compute_mdhash_id(dp["content"], prefix="chunk-"): {
+                        **dp,
+                        "full_doc_id": doc_id,
+                        "file_path": file_path,
+                        "llm_cache_list": [],
+                    }
+                    for dp in chunking_result
+                }
+                if not chunks:
+                    logger.warning(f"[hot_pipeline] No chunks for {file_path}")
+                    return
+
+                # Stage 1: store chunks + mark PROCESSING
+                await rag.doc_status.upsert({
+                    doc_id: {
+                        "status": DocStatus.PROCESSING,
+                        "chunks_count": len(chunks),
+                        "chunks_list": list(chunks.keys()),
+                        "content_summary": status_doc.content_summary,
+                        "content_length": status_doc.content_length,
+                        "created_at": status_doc.created_at,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "file_path": file_path,
+                        "track_id": status_doc.track_id,
+                        "metadata": {"processing_start_time": processing_start_time},
+                    }
+                })
+                await asyncio.gather(
+                    rag.chunks_vdb.upsert(chunks),
+                    rag.text_chunks.upsert(chunks),
+                )
+
+                # Stage 2: extract entities (with timeout to prevent infinite hangs)
+                _extract_timeout = int(os.environ.get("LLM_TIMEOUT", "600"))
+                try:
+                    chunk_results = await asyncio.wait_for(
+                        rag._process_extract_entities(
+                            chunks, pipeline_status, pipeline_status_lock
+                        ),
+                        timeout=_extract_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    raise RuntimeError(
+                        f"Extraction timed out after {_extract_timeout}s for {file_path} "
+                        f"({len(chunks)} chunks)"
+                    )
+
+                # Stage 3: merge into knowledge graph
+                try:
+                    await asyncio.wait_for(
+                        merge_nodes_and_edges(
+                            chunk_results=chunk_results,
+                            knowledge_graph_inst=rag.chunk_entity_relation_graph,
+                            entity_vdb=rag.entities_vdb,
+                            relationships_vdb=rag.relationships_vdb,
+                            global_config=asdict(rag),
+                            full_entities_storage=rag.full_entities,
+                            full_relations_storage=rag.full_relations,
+                            doc_id=doc_id,
+                            pipeline_status=pipeline_status,
+                            pipeline_status_lock=pipeline_status_lock,
+                            llm_response_cache=rag.llm_response_cache,
+                            entity_chunks_storage=rag.entity_chunks,
+                            relation_chunks_storage=rag.relation_chunks,
+                            current_file_number=0,
+                            total_files=0,
+                            file_path=file_path,
+                        ),
+                        timeout=_extract_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    raise RuntimeError(
+                        f"Merge timed out after {_extract_timeout}s for {file_path}"
+                    )
+
+                # Done — mark PROCESSED and flush
+                processing_end_time = int(time.time())
+                await rag.doc_status.upsert({
+                    doc_id: {
+                        "status": DocStatus.PROCESSED,
+                        "chunks_count": len(chunks),
+                        "chunks_list": list(chunks.keys()),
+                        "content_summary": status_doc.content_summary,
+                        "content_length": status_doc.content_length,
+                        "created_at": status_doc.created_at,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "file_path": file_path,
+                        "track_id": status_doc.track_id,
+                        "metadata": {
+                            "processing_start_time": processing_start_time,
+                            "processing_end_time": processing_end_time,
+                        },
+                    }
+                })
+                await rag._insert_done()
+                elapsed = processing_end_time - processing_start_time
+                logger.info(f"[hot_pipeline] ✓ {file_path} ({elapsed}s)")
+
+            except Exception as e:
+                logger.error(f"[hot_pipeline] ✗ {file_path}: {e}")
+                logger.error(traceback.format_exc())
+                processing_end_time = int(time.time())
+                try:
+                    await rag.doc_status.upsert({
+                        doc_id: {
+                            "status": DocStatus.FAILED,
+                            "error_msg": str(e),
+                            "content_summary": status_doc.content_summary,
+                            "content_length": status_doc.content_length,
+                            "created_at": status_doc.created_at,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                            "file_path": file_path,
+                            "track_id": status_doc.track_id,
+                            "metadata": {
+                                "processing_start_time": processing_start_time,
+                                "processing_end_time": processing_end_time,
+                            },
+                        }
+                    })
+                except Exception:
+                    logger.error(f"[hot_pipeline] Failed to update status for {doc_id}")
+            finally:
+                _launched_docs.discard(doc_id)
+
+    async def _streaming_loop(rag):
+        """Persistent streaming worker — never exits, no lock cycling."""
+        logger.info(f"[hot_pipeline] Streaming worker started ({_max_workers} slots)")
+        semaphore = asyncio.Semaphore(_max_workers)
+        active_tasks: set[asyncio.Task] = set()
+
+        while True:
+            # Snapshot signaled workspaces
+            workspaces = _pending_workspaces.copy()
+            _pending_workspaces.clear()
+
+            launched_any = False
+            for ws in workspaces:
+                _current_workspace.set(ws)
+                pipeline_status = await get_namespace_data(
+                    "pipeline_status", workspace=ws
+                )
+                pipeline_status_lock = get_namespace_lock(
+                    "pipeline_status", workspace=ws
+                )
+
+                # Recover stale PROCESSING docs — hard wall-clock cutoff
+                _hard_timeout = int(os.environ.get("LLM_TIMEOUT", "600"))
+                try:
+                    processing = await rag.doc_status.get_docs_by_status(DocStatus.PROCESSING)
+                    now = int(time.time())
+                    for did, sdoc in processing.items():
+                        meta = getattr(sdoc, "metadata", None) or {}
+                        start = meta.get("processing_start_time", 0)
+                        if not start:
+                            continue
+                        elapsed = now - start
+                        # Orphaned docs (no active task): fail after 1x timeout
+                        # Active docs (task exists but stuck): fail after 2x timeout
+                        threshold = _hard_timeout if did not in _launched_docs else _hard_timeout * 2
+                        if elapsed > threshold:
+                            fp = getattr(sdoc, "file_path", "unknown") or "unknown"
+                            logger.warning(
+                                f"[hot_pipeline] Force-failing stuck doc {fp} "
+                                f"(elapsed {elapsed}s, threshold {threshold}s, "
+                                f"active={'yes' if did in _launched_docs else 'no'})"
+                            )
+                            # Remove from launched set so the task slot is freed
+                            _launched_docs.discard(did)
+                            await rag.doc_status.upsert({
+                                did: {
+                                    "status": DocStatus.FAILED,
+                                    "error_msg": f"Hard timeout: stuck {elapsed}s (limit {threshold}s)",
+                                    "content_summary": sdoc.content_summary,
+                                    "content_length": sdoc.content_length,
+                                    "created_at": sdoc.created_at,
+                                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                                    "file_path": fp,
+                                    "track_id": sdoc.track_id,
+                                    "metadata": meta,
+                                }
+                            })
+                except Exception as e:
+                    logger.error(f"[hot_pipeline] Stale recovery failed (ws={ws}): {e}")
+
+                # Poll for PENDING docs only — failed docs require explicit reprocess
+                try:
+                    pending = await rag.doc_status.get_docs_by_status(DocStatus.PENDING)
+                except Exception as e:
+                    logger.error(f"[hot_pipeline] Failed to poll docs (ws={ws}): {e}")
+                    continue
+
+                if pending:
+                    logger.info(f"[hot_pipeline] Found {len(pending)} docs to process in workspace '{ws}'")
+
+                for doc_id, status_doc in pending.items():
+                    if doc_id in _launched_docs:
+                        continue
+                    _launched_docs.add(doc_id)
+                    launched_any = True
+                    task = asyncio.create_task(
+                        _process_doc(
+                            rag, doc_id, status_doc,
+                            pipeline_status, pipeline_status_lock, semaphore,
+                        )
+                    )
+                    active_tasks.add(task)
+                    task.add_done_callback(active_tasks.discard)
+
+            if active_tasks:
+                # Wait for ANY task to complete OR new work signal — whichever first
+                signal_waiter = asyncio.ensure_future(_work_event.wait())
+                done, _ = await asyncio.wait(
+                    active_tasks | {signal_waiter},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if signal_waiter in done:
+                    _work_event.clear()
+                else:
+                    signal_waiter.cancel()
+                    try:
+                        await signal_waiter
+                    except asyncio.CancelledError:
+                        pass
+                # Loop immediately — check for new pending docs
+            else:
+                # Nothing active, block until signaled
+                await _work_event.wait()
+                _work_event.clear()
+
+    LightRAG.apipeline_process_enqueue_documents = _signaling_process
+
+    # Capture rag instance on creation so the middleware can start the loop
+    _orig_init = LightRAG.__init__
+
+    def _capturing_init(self, *args, **kwargs):
+        _orig_init(self, *args, **kwargs)
+        _rag_ref[0] = self
+        # Make LLM response cache global across all workspaces so
+        # extraction results are shared and the cache stays pre-warmed.
+        if hasattr(self, 'llm_response_cache'):
+            _make_cache_global(self.llm_response_cache)
+
+    LightRAG.__init__ = _capturing_init
+    logger.info(f"[hot_pipeline] Streaming pipeline patch installed ({_max_workers} workers)")
+
+    # Expose internals for middleware use
+    def _signal_workspace(ws):
+        nonlocal _loop_started
+        _pending_workspaces.add(ws)
+        _work_event.set()
+        # Start loop if we have a rag ref but loop isn't running
+        if not _loop_started and _rag_ref[0] is not None:
+            _loop_started = True
+            asyncio.create_task(_streaming_loop(_rag_ref[0]))
+    _patch_hot_pipeline._signal = _signal_workspace
+
+
 def main():
     # Patch classes BEFORE the app creates any instances
     _patch_classes()
@@ -715,6 +1081,7 @@ def main():
     _patch_llm_max_tokens()
     _patch_neo4j_typed_relationships()
     _patch_pipelined_embedding()
+    _patch_hot_pipeline()
 
     from lightrag.api.lightrag_server import create_app
     from lightrag.api.config import parse_args

@@ -3,17 +3,30 @@ import { useNavigate } from 'react-router-dom';
 import { useWorkspaces } from '../hooks/useWorkspaces';
 import { useWorkspace } from '../hooks/useWorkspaceContext';
 import { deleteWorkspace } from '../api';
+import usePagination from '../hooks/usePagination';
 import JobStatusBadge from '../components/JobStatusBadge';
+import Pagination from '../components/Pagination';
 
 export default function DashboardPage() {
   const { workspaces, loading, error, refresh } = useWorkspaces();
   const { workspace: activeWorkspace, switchWorkspace } = useWorkspace();
   const navigate = useNavigate();
   const [deleting, setDeleting] = useState(null);
+  const [newName, setNewName] = useState('');
+  const { paged, page, pageSize, totalPages, totalItems, setPage, changePageSize, PAGE_SIZE_OPTIONS } = usePagination(workspaces, 'workspaces');
 
   const handleClick = (name) => {
     switchWorkspace(name);
-    navigate('/ingest');
+    navigate('/data');
+  };
+
+  const handleCreateWorkspace = () => {
+    const name = newName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+    if (name) {
+      switchWorkspace(name);
+      setNewName('');
+      navigate('/data');
+    }
   };
 
   const handleDelete = async (e, name) => {
@@ -55,8 +68,9 @@ export default function DashboardPage() {
           <p className="text-sm mt-1">Select a workspace and upload documents to get started.</p>
         </div>
       ) : (
+        <>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {workspaces.map((ws) => (
+          {paged.map((ws) => (
             <div
               key={ws.name}
               onClick={() => handleClick(ws.name)}
@@ -105,7 +119,33 @@ export default function DashboardPage() {
               )}
             </div>
           ))}
+          <div className="border border-dashed border-gray-300 rounded-lg p-5 flex flex-col items-center justify-center gap-3">
+            <p className="text-sm font-medium text-gray-500">New workspace</p>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleCreateWorkspace()}
+                placeholder="workspace-name"
+                className="text-sm rounded px-3 py-1.5 border border-gray-300 focus:border-blue-500 focus:outline-none w-40"
+              />
+              <button
+                onClick={handleCreateWorkspace}
+                disabled={!newName.trim()}
+                className="text-sm bg-blue-600 text-white px-3 py-1.5 rounded hover:bg-blue-700 disabled:opacity-50"
+              >
+                Create
+              </button>
+            </div>
+          </div>
         </div>
+        <Pagination
+          page={page} totalPages={totalPages} totalItems={totalItems}
+          pageSize={pageSize} onPageChange={setPage} onPageSizeChange={changePageSize}
+          pageSizeOptions={PAGE_SIZE_OPTIONS}
+        />
+        </>
       )}
     </div>
   );

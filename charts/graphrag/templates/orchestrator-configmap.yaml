@@ -32,15 +32,22 @@ data:
   {{- end }}
   EMBEDDING_MODE: {{ .Values.embedding.mode | default "dedicated" | quote }}
   # Reranker (for data query health checks)
+  {{- if .Values.cpuRerank.enabled }}
+  RERANKER_URL: "http://cpu-rerank.{{ .Values.namespace }}.svc.cluster.local:8000"
+  {{- else }}
   RERANKER_URL: {{ .Values.orchestrator.rerankerUrl | quote }}
+  {{- end }}
   # Query activity tracking (Redis TTL for burst mode coordination)
   QUERY_ACTIVITY_KEY: {{ .Values.orchestrator.queryActivityKey | quote }}
   QUERY_ACTIVITY_TTL: {{ .Values.orchestrator.queryActivityTtl | default "120" | quote }}
   # Summarizer (uses vllm-extract via OpenAI-compatible API)
   SUMMARIZER_URL: "http://vllm-extract.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.extraction.port }}/v1"
   SUMMARIZER_MODEL: {{ .Values.extraction.servedModelName | quote }}
-  # Query LLM (dedicated vllm-query for explain/synthesis)
-  {{- if .Values.query.enabled }}
+  # Query LLM (dedicated for explain/synthesis)
+  {{- if .Values.cpuQuery.enabled }}
+  QUERY_LLM_URL: "http://cpu-query.{{ .Values.namespace }}.svc.cluster.local:8000/v1"
+  QUERY_LLM_MODEL: "qwen3-4b-cpu"
+  {{- else if .Values.query.enabled }}
   QUERY_LLM_URL: "http://vllm-query.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.query.port }}/v1"
   QUERY_LLM_MODEL: {{ .Values.query.servedModelName | quote }}
   {{- end }}
@@ -53,4 +60,11 @@ data:
   ARCHIVAL_AFTER_TURNS: {{ .Values.orchestrator.archivalAfterTurns | default "20" | quote }}
   RECALL_TOP_K: {{ .Values.orchestrator.recallTopK | default "3" | quote }}
   ARCHIVAL_TOP_K: {{ .Values.orchestrator.archivalTopK | default "3" | quote }}
+  {{- if .Values.auth.enabled }}
+  # Authentication
+  AUTH_ENABLED: "true"
+  AUTH_REDIRECT_URI: {{ .Values.auth.redirectUri | quote }}
+  AUTH_ALLOWED_DOMAIN: {{ .Values.auth.allowedDomain | default "" | quote }}
+  AUTH_SESSION_TTL_SECONDS: {{ .Values.auth.sessionTtlSeconds | default "86400" | quote }}
+  {{- end }}
 {{- end }}

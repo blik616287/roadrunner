@@ -1,4 +1,3 @@
-import asyncio
 import gzip
 import io
 import logging
@@ -17,45 +16,47 @@ _SKIP_DIRS = {
     ".tox", ".venv", "venv", ".mypy_cache", ".pytest_cache",
     "dist", "build", ".next", "target",
 }
-_SKIP_EXTENSIONS = {
-    ".pyc", ".pyo", ".so", ".dylib", ".dll", ".o", ".a",
-    ".class", ".jar", ".war", ".exe", ".bin",
-    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".bmp",
-    ".woff", ".woff2", ".ttf", ".eot",
-    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
-    ".lock", ".map",
+# Allowlist: only these extensions are ingested
+_SUPPORTED_EXTENSIONS = {
+    # Code (tree-sitter)
+    ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".go", ".rs", ".java", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx",
+    # Documents
+    ".pdf", ".md", ".txt", ".rst", ".html", ".htm",
+    # YAML
+    ".yaml", ".yml",
+    # Config
+    ".ini", ".toml", ".cfg", ".conf", ".env", ".properties",
+    # JSON
+    ".json", ".jsonl", ".jsonc",
+    # Shell
+    ".sh", ".bash", ".zsh", ".fish",
 }
 _MAX_FILE_SIZE = 1024 * 1024  # 1MB per file
 _MAX_FILES = 2000
 
 
-async def process_document(job_id: str, doc_id: str, preprocessor_url: str) -> dict:
-    """Process a single document ingestion job."""
-    doc = await db.get_document_blob(doc_id)
-    if not doc:
-        raise ValueError(f"Document {doc_id} not found in database")
+async def process_documents_batch(
+    doc_ids: list[str], preprocessor_url: str, batch_size: int = 20
+) -> dict:
+    """Process multiple document jobs in a single batched preprocessor call."""
+    files_to_send = []
+    workspace = None
+    for doc_id in doc_ids:
+        doc = await db.get_document_blob(doc_id)
+        if not doc:
+            logger.warning(f"Document {doc_id} not found, skipping")
+            continue
+        file_name, ws, compressed_blob, metadata = doc
+        if workspace is None:
+            workspace = ws
+        content = gzip.decompress(compressed_blob)
+        files_to_send.append((file_name, content))
 
-    file_name, workspace, compressed_blob, metadata = doc
-    content = gzip.decompress(compressed_blob)
+    if not files_to_send:
+        return {"documents_sent": 0, "errors": [], "track_ids": [], "files": []}
 
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        resp = await client.post(
-            f"{preprocessor_url}/ingest",
-            files={"files": (file_name, content, "application/octet-stream")},
-            headers={"X-Workspace": workspace},
-        )
-        resp.raise_for_status()
-        result = resp.json()
-
-    tracks = result.get("track_ids", [])
-    track_ids = [t["track_id"] for t in tracks]
-    files = [t["file_source"] for t in tracks]
-    return {
-        "documents_sent": result.get("documents_sent", 0),
-        "errors": result.get("errors", []),
-        "track_ids": track_ids,
-        "files": files,
-    }
+    return await _send_batched(files_to_send, workspace, preprocessor_url, batch_size)
 
 
 async def process_codebase(
@@ -73,16 +74,25 @@ async def process_codebase(
     if not extracted:
         raise ValueError(f"Could not extract files from {file_name}")
 
+    result = await _send_batched(extracted, workspace, preprocessor_url, batch_size)
+    result["files_found"] = len(extracted)
+    return result
+
+
+async def _send_batched(
+    files: list[tuple[str, bytes]], workspace: str, preprocessor_url: str, batch_size: int
+) -> dict:
+    """Send files to the preprocessor in batches."""
     errors = []
     total_docs = 0
     all_track_ids = []
     all_files = []
     async with httpx.AsyncClient(timeout=300.0) as client:
-        for batch_start in range(0, len(extracted), batch_size):
-            batch = extracted[batch_start:batch_start + batch_size]
+        for batch_start in range(0, len(files), batch_size):
+            batch = files[batch_start:batch_start + batch_size]
             files_payload = [
-                ("files", (fpath, fcontent, "application/octet-stream"))
-                for fpath, fcontent in batch
+                ("files", (fname, fcontent, "application/octet-stream"))
+                for fname, fcontent in batch
             ]
             try:
                 resp = await client.post(
@@ -102,51 +112,11 @@ async def process_codebase(
                 errors.append(f"batch {batch_start // batch_size}: {e}")
 
     return {
-        "files_found": len(extracted),
         "documents_sent": total_docs,
         "errors": errors,
         "track_ids": all_track_ids,
         "files": all_files,
     }
-
-
-async def poll_track_status(
-    track_ids: list[str],
-    workspace: str,
-    lightrag_url: str,
-    timeout: int = 300,
-    interval: int = 5,
-) -> bool:
-    """Poll LightRAG track_status for each track_id until all are processed.
-
-    Returns True if timed out (some docs still not processed), False if all done.
-    """
-    pending = set(track_ids)
-    elapsed = 0
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        while elapsed < timeout and pending:
-            done = set()
-            for tid in pending:
-                try:
-                    resp = await client.get(
-                        f"{lightrag_url}/documents/track_status/{tid}",
-                        headers={"LIGHTRAG-WORKSPACE": workspace},
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        summary = data.get("status_summary", {})
-                        total = sum(summary.values())
-                        processed = summary.get("processed", 0) + summary.get("failed", 0)
-                        if total > 0 and processed >= total:
-                            done.add(tid)
-                except Exception as e:
-                    logger.warning(f"track_status poll error for {tid}: {e}")
-            pending -= done
-            if not pending:
-                return False
-            await asyncio.sleep(interval)
-            elapsed += interval
-    return len(pending) > 0
 
 
 def _extract_archive(data: bytes, filename: str) -> list[tuple[str, bytes]]:
@@ -191,7 +161,7 @@ def _should_skip(path: str, size: int) -> bool:
     if any(p in _SKIP_DIRS for p in parts):
         return True
     ext = PurePosixPath(path).suffix.lower()
-    if ext in _SKIP_EXTENSIONS:
+    if ext not in _SUPPORTED_EXTENSIONS:
         return True
     if size > _MAX_FILE_SIZE:
         return True

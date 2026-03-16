@@ -1,0 +1,78 @@
+{{- if .Values.cpuQuery.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cpu-query
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: cpu-query
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cpu-query
+  template:
+    metadata:
+      labels:
+        app: cpu-query
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      containers:
+        - name: llm
+          image: {{ .Values.cpuQuery.image }}
+          imagePullPolicy: Never
+          command: ["uvicorn", "app.server:app", "--host", "0.0.0.0", "--port", "8000"]
+          env:
+            - name: MODEL_PATH
+              value: {{ .Values.cpuQuery.modelPath }}
+            - name: N_CTX
+              value: {{ .Values.cpuQuery.nCtx | quote }}
+            - name: N_THREADS
+              value: {{ .Values.cpuQuery.nThreads | quote }}
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            {{- toYaml .Values.cpuQuery.resources | nindent 12 }}
+          volumeMounts:
+            - name: model-data
+              mountPath: /data
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            failureThreshold: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: model-data
+          persistentVolumeClaim:
+            claimName: {{ .Values.cpuQuery.pvc }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cpu-query
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: cpu-query
+spec:
+  selector:
+    app: cpu-query
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+{{- end }}

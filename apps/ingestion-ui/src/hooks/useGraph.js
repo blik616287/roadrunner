@@ -1,52 +1,35 @@
 import { useState, useCallback, useEffect } from 'react';
-import { queryGraph, getGraphLabels, getGraphByLabel, getWeights } from '../api';
+import { queryGraph, getTopGraph, getWeights } from '../api';
 
-export function useGraph(workspace) {
+export function useGraph(workspace, limit = 2000) {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [weights, setWeights] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [truncated, setTruncated] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
+  const [totalNodes, setTotalNodes] = useState(0);
+  const [totalEdges, setTotalEdges] = useState(0);
 
-  const buildGraph = useCallback((nodes, edges, weightData) => {
-    const nodeMap = new Map();
-    nodes.forEach((n) => {
-      const id = n.id || n.entity_name || n.name;
-      if (id && !nodeMap.has(id)) {
-        const props = n.properties || {};
-        const label = props.entity_id || id;
-        nodeMap.set(id, {
-          id,
-          label,
-          type: props.entity_type || n.entity_type || n.type || 'unknown',
-          description: props.description || n.description || '',
-          weight: weightData?.entities?.[label] || weightData?.entities?.[id] || 1,
-        });
-      }
+  const applyWeights = useCallback((nodes, edges, weightData) => {
+    const finalNodes = nodes.map((n) => ({
+      ...n,
+      weight: weightData?.entities?.[n.label] || weightData?.entities?.[n.id] || 1,
+    }));
+
+    const nodeMap = new Map(finalNodes.map((n) => [n.id, n]));
+    const finalLinks = edges.map((e) => {
+      const srcLabel = nodeMap.get(e.source)?.label || e.source;
+      const tgtLabel = nodeMap.get(e.target)?.label || e.target;
+      const edgeKey = `${srcLabel}||${tgtLabel}`;
+      const edgeKeyRev = `${tgtLabel}||${srcLabel}`;
+      return {
+        ...e,
+        weight: weightData?.relations?.[edgeKey] || weightData?.relations?.[edgeKeyRev] || 1,
+      };
     });
 
-    const links = [];
-    edges.forEach((e) => {
-      const src = e.source || e.src_id;
-      const tgt = e.target || e.tgt_id;
-      if (src && tgt) {
-        if (!nodeMap.has(src)) nodeMap.set(src, { id: src, label: src, type: 'unknown', weight: 1 });
-        if (!nodeMap.has(tgt)) nodeMap.set(tgt, { id: tgt, label: tgt, type: 'unknown', weight: 1 });
-        const props = e.properties || {};
-        // Resolve node labels for weight lookup (Neo4j uses numeric IDs, weights use entity names)
-        const srcLabel = nodeMap.get(src)?.label || src;
-        const tgtLabel = nodeMap.get(tgt)?.label || tgt;
-        const edgeKey = `${srcLabel}||${tgtLabel}`;
-        const edgeKeyRev = `${tgtLabel}||${srcLabel}`;
-        links.push({
-          source: src,
-          target: tgt,
-          label: props.description || e.description || e.relation || e.type || '',
-          weight: weightData?.relations?.[edgeKey] || weightData?.relations?.[edgeKeyRev] || 1,
-        });
-      }
-    });
-
-    return { nodes: Array.from(nodeMap.values()), links };
+    return { nodes: finalNodes, links: finalLinks };
   }, []);
 
   const fetchWeights = useCallback(async () => {
@@ -63,26 +46,24 @@ export function useGraph(workspace) {
     try {
       setLoading(true);
       setError(null);
-      const [labels, weightData] = await Promise.all([
-        getGraphLabels(workspace),
+      const [data, weightData] = await Promise.all([
+        getTopGraph(workspace, limit),
         fetchWeights(),
       ]);
       setWeights(weightData);
-      const allNodes = [];
-      const allEdges = [];
-      for (const label of labels) {
-        const g = await getGraphByLabel(label, workspace);
-        allNodes.push(...(g.nodes || []));
-        allEdges.push(...(g.edges || []));
-      }
-      setGraphData(buildGraph(allNodes, allEdges, weightData));
+      const graph = applyWeights(data.nodes || [], data.edges || [], weightData);
+      setGraphData(graph);
+      setTruncated(data.truncated || false);
+      setTotalCount(data.node_count || graph.nodes.length);
+      setTotalNodes(data.total_nodes || 0);
+      setTotalEdges(data.total_edges || 0);
     } catch (e) {
       setError(e.message);
       setGraphData({ nodes: [], links: [] });
     } finally {
       setLoading(false);
     }
-  }, [workspace, buildGraph, fetchWeights]);
+  }, [workspace, limit, applyWeights, fetchWeights]);
 
   const fetchGraph = useCallback(async (query, mode = 'local') => {
     if (!workspace) return;
@@ -98,27 +79,30 @@ export function useGraph(workspace) {
       const relations = data.data?.relationships || data.data?.relations || data.relationships || data.relations || [];
       const nodes = entities.map((e) => ({
         id: e.entity_name || e.name,
-        entity_name: e.entity_name || e.name,
-        entity_type: e.entity_type || e.type,
-        description: e.description,
+        label: e.entity_name || e.name,
+        type: e.entity_type || e.type || 'unknown',
+        description: e.description || '',
       }));
       const edges = relations.map((r) => ({
         source: r.src_id || r.source,
         target: r.tgt_id || r.target,
-        description: r.description || r.relation,
+        label: r.description || r.relation || '',
       }));
-      setGraphData(buildGraph(nodes, edges, weightData));
+      const graph = applyWeights(nodes, edges, weightData);
+      setGraphData(graph);
+      setTruncated(false);
+      setTotalCount(graph.nodes.length);
     } catch (e) {
       setError(e.message);
       setGraphData({ nodes: [], links: [] });
     } finally {
       setLoading(false);
     }
-  }, [workspace, buildGraph, fetchWeights]);
+  }, [workspace, applyWeights, fetchWeights]);
 
   useEffect(() => {
     fetchFullGraph();
   }, [fetchFullGraph]);
 
-  return { graphData, weights, loading, error, fetchGraph, fetchFullGraph };
+  return { graphData, weights, loading, error, truncated, totalCount, totalNodes, totalEdges, fetchGraph, fetchFullGraph };
 }

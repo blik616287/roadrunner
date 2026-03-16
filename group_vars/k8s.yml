@@ -30,8 +30,20 @@ models:
     namespace: graphrag
     pvc: model-qwen3-30b-a3b
     size: 25Gi
-    num_ctx: "8192"
+    num_ctx: "16384"
     served_model_name: "qwen3-30b-a3b-extract"
+
+  query_cpu:
+    name: "qwen3-4b"
+    tag: "Qwen/Qwen3-4B"
+    source: gguf
+    gguf_repo: "unsloth/Qwen3-4B-GGUF"
+    gguf_file: "Qwen3-4B-Q4_K_M.gguf"
+    tokenizer: "Qwen/Qwen3-4B"
+    quant: "Q4_K_M"
+    namespace: graphrag
+    pvc: model-qwen3-4b
+    size: 5Gi
 
   embed:
     name: "qwen3-embedding"
@@ -124,6 +136,17 @@ test_models:
     namespace: graphrag
     pvc: model-phi-4-14b
     size: 10Gi
+
+# ── Authentication (OIDC) ─────────────────────────────────────────────
+# Set auth.enabled=true and provide Google OAuth credentials to enable.
+# Override at runtime:  -e auth.enabled=true -e auth.google_client_id=...
+auth:
+  enabled: false
+  google_client_id: "{{ lookup('env', 'GOOGLE_CLIENT_ID') }}"
+  google_client_secret: "{{ lookup('env', 'GOOGLE_CLIENT_SECRET') }}"
+  session_secret: "{{ lookup('env', 'GRAPHRAG_SESSION_SECRET') | default('change-me-in-prod', true) }}"
+  redirect_uri: ""
+  allowed_domain: ""
 
 # ── GraphRAG Pipeline Settings ───────────────────────────────────────
 graphrag:

@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
+from .auth import set_settings as set_auth_settings
 from .config import Settings
 from .db import init_pool, close_pool
 from .services import (
@@ -14,7 +15,7 @@ from .services import (
     nats_client,
     reconcile,
 )
-from .routes import chat, models_list, documents, sessions, jobs, workspaces, data_query, internal
+from .routes import auth, chat, models_list, documents, sessions, jobs, workspaces, data_query, graph, internal
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orchestrator")
@@ -28,6 +29,10 @@ _http_client: httpx.AsyncClient | None = None
 async def lifespan(app: FastAPI):
     global _http_client
     logger.info("Starting GraphRAG Orchestrator...")
+
+    # Store settings for auth dependency
+    app.state.settings = settings
+    set_auth_settings(settings)
 
     # Initialize services
     embedding.init_embedding(settings.embed_url, settings.embed_model)
@@ -52,6 +57,8 @@ async def lifespan(app: FastAPI):
     data_query.init_data_query(settings, _http_client)
     documents.init_documents(settings)
     workspaces.init_workspaces(settings)
+    jobs.init_jobs(settings)
+    graph.init_graph(settings)
     reconcile.init_reconcile(settings, _http_client)
 
     logger.info("GraphRAG Orchestrator ready")
@@ -60,6 +67,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down GraphRAG Orchestrator...")
     reconcile.close_reconcile()
+    await graph.close_graph()
     await nats_client.close_nats()
     await _http_client.aclose()
     await working_memory.close_redis()
@@ -73,6 +81,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(models_list.router)
 app.include_router(documents.router)
@@ -80,6 +89,7 @@ app.include_router(sessions.router)
 app.include_router(jobs.router)
 app.include_router(workspaces.router)
 app.include_router(data_query.router)
+app.include_router(graph.router)
 app.include_router(internal.router)
 
 

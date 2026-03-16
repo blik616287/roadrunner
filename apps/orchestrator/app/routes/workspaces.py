@@ -1,8 +1,9 @@
 import logging
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Header
 
+from ..auth import get_current_user
 from ..config import Settings
 from ..db import get_pool
 
@@ -18,7 +19,7 @@ def init_workspaces(settings: Settings):
 
 
 @router.delete("/v1/workspaces/{workspace}")
-async def delete_workspace(workspace: str):
+async def delete_workspace(workspace: str, _user: dict = Depends(get_current_user)):
     """Delete all orchestrator documents, jobs, and LightRAG data for a workspace."""
     pool = get_pool()
     deleted_jobs = await pool.execute(
@@ -53,35 +54,44 @@ async def delete_workspace(workspace: str):
 
 
 @router.get("/v1/workspaces")
-async def list_workspaces():
+async def list_workspaces(_user: dict = Depends(get_current_user)):
     pool = get_pool()
-    rows = await pool.fetch("""
-        SELECT
-            d.workspace,
-            COUNT(DISTINCT d.id) AS doc_count,
-            COUNT(DISTINCT j.id) FILTER (WHERE j.status = 'queued') AS queued,
-            COUNT(DISTINCT j.id) FILTER (WHERE j.status = 'processing') AS processing,
-            COUNT(DISTINCT j.id) FILTER (WHERE j.status = 'completed') AS completed,
-            COUNT(DISTINCT j.id) FILTER (WHERE j.status = 'failed') AS failed,
-            MAX(d.created_at) AS last_activity
-        FROM orchestrator_documents d
-        LEFT JOIN orchestrator_ingest_jobs j ON j.doc_id = d.id
-        GROUP BY d.workspace
+
+    # Get workspace list + doc counts from orchestrator
+    ws_rows = await pool.fetch("""
+        SELECT workspace, COUNT(*) AS doc_count, MAX(created_at) AS last_activity
+        FROM orchestrator_documents
+        GROUP BY workspace
         ORDER BY last_activity DESC
     """)
-    return {
-        "workspaces": [
-            {
-                "name": r["workspace"],
-                "doc_count": r["doc_count"],
-                "jobs": {
-                    "queued": r["queued"],
-                    "processing": r["processing"],
-                    "completed": r["completed"],
-                    "failed": r["failed"],
-                },
-                "last_activity": r["last_activity"].isoformat() if r["last_activity"] else None,
-            }
-            for r in rows
-        ]
-    }
+
+    # Get job counts from orchestrator_ingest_jobs (single source of truth)
+    job_rows = await pool.fetch("""
+        SELECT
+            workspace,
+            COUNT(*) FILTER (WHERE status = 'queued') AS queued,
+            COUNT(*) FILTER (WHERE status IN ('started', 'indexing', 'processing')) AS processing,
+            COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+            COUNT(*) FILTER (WHERE status = 'failed') AS failed
+        FROM orchestrator_ingest_jobs
+        GROUP BY workspace
+    """)
+    job_map = {r["workspace"]: r for r in job_rows}
+
+    workspaces = []
+    for r in ws_rows:
+        ws = r["workspace"]
+        jm = job_map.get(ws)
+        workspaces.append({
+            "name": ws,
+            "doc_count": r["doc_count"],
+            "jobs": {
+                "queued": jm["queued"] if jm else 0,
+                "processing": jm["processing"] if jm else 0,
+                "completed": jm["completed"] if jm else 0,
+                "failed": jm["failed"] if jm else 0,
+            },
+            "last_activity": r["last_activity"].isoformat() if r["last_activity"] else None,
+        })
+
+    return {"workspaces": workspaces}

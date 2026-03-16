@@ -61,7 +61,7 @@ The ingestion UI (`http://localhost:31300`) is a full-featured management consol
 
 ### Dashboard
 
-Workspace overview with card-based layout. Each card shows document counts, job status breakdown (queued / processing / completed / failed), and last activity. Click a workspace to switch into it, or delete it with a confirmation dialog.
+Workspace overview with card-based layout. Each card shows document counts, job status breakdown (queued / processing / completed / failed), and last activity. Click a workspace to switch into it, or delete it with a confirmation dialog. Create new workspaces directly from the dashboard via the inline creation card. Paginated with configurable page size (10 / 25 / 50 / 100).
 
 ### Ingest
 
@@ -69,19 +69,19 @@ Drag-and-drop file upload with automatic type detection — archives (`.tar.gz`,
 
 ### Jobs
 
-Real-time job tracker with **3-second auto-polling**. Filter by status (queued, processing, indexing, completed, failed). Click any row to expand and see the full job ID, doc ID, attempt count, error messages, extracted file lists, and raw result JSON.
+Real-time job tracker with **3-second auto-polling**. Filter by status (queued, processing, indexing, completed, failed). Click any row to expand and see the full job ID, doc ID, attempt count, error messages, extracted file lists, and raw result JSON. All columns are sortable (persisted across reloads). Paginated with configurable page size.
 
 ### Documents
 
-Unified view merging orchestrator records with LightRAG indexing status. Each document shows both its ingestion status and graph processing status. Download originals or delete documents — deletion cascades through both the orchestrator DB and the knowledge graph. Orphaned documents (in LightRAG but not the orchestrator) are highlighted for cleanup.
+Unified view merging orchestrator records with LightRAG indexing status into a single status column. Download originals or delete documents — deletion cascades through both the orchestrator DB and the knowledge graph. Orphaned documents (in LightRAG but not the orchestrator) are highlighted for cleanup. All columns are sortable (persisted across reloads). Paginated with configurable page size.
 
 ### Graph Explorer
 
-Interactive force-directed knowledge graph visualization. Nodes are **color-coded by entity type** (person, organization, technology, function, class, module, file, and more). Click any node to inspect its name, type, and description in a detail panel. Zoom, pan, and fit-to-screen controls. Search to filter the graph to a local subgraph, or load the full graph across all entity types.
+Interactive force-directed knowledge graph visualization. Nodes are **color-coded by entity type** (person, organization, technology, function, class, module, file, and more). Click any node to inspect its name, type, and description in a detail panel. Zoom, pan, and fit-to-screen controls. Search to filter the graph to a local subgraph, or load the full graph across all entity types. Tuned d3-force parameters (adaptive charge strength, link distance, velocity decay) for well-spaced layouts even on large graphs. Labels render only above a zoom threshold to keep the view clean.
 
 ### Query
 
-Five query modes in one interface: **vector search** (naive), **vector + graph** (mix), **graph local** (subgraph around matched entities), **graph global** (full traversal), and **graph hybrid**. Results are organized into collapsible sections for chunks (with expandable 300-char previews), entities, and relationships. Hit **Explain** to get a natural-language LLM summary via the dedicated vllm-query instance.
+Five query modes in one interface: **vector search** (naive), **vector + graph** (mix), **graph local** (subgraph around matched entities), **graph global** (full traversal), and **graph hybrid**. Results are organized into collapsible sections for chunks (with expandable 300-char previews), entities, and relationships. Hit **Explain** to get a **streaming markdown-rendered LLM explanation** with inline citations (`[1]`, `[2]`, ...) and a numbered sources footer, powered by the dedicated vllm-query instance.
 
 ---
 
@@ -182,7 +182,7 @@ curl -X POST http://localhost:31800/v1/data/query \
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/v1/data/query` | Query the knowledge graph. Returns entities, relations, and source chunks. Returns 503 during burst ingestion mode. |
-| `POST` | `/v1/data/explain` | Query the graph then synthesize a natural-language answer via vllm-query. Falls back to raw context on LLM failure. |
+| `POST` | `/v1/data/explain` | Query the graph then stream a markdown-formatted LLM explanation via SSE with numbered source citations. |
 | `POST` | `/v1/data/reconcile` | Find disconnected graph clusters and create BRIDGE_TO edges to the main component using pgvector similarity. |
 | `GET`  | `/v1/data/weights?workspace=X` | Return blended weights (chunk count + degree) for entities and geometric-mean weights for relations. |
 
@@ -304,10 +304,10 @@ sequenceDiagram
 ```
 
 1. **Orchestrator** receives the upload, gzip-compresses the blob into PostgreSQL, creates a job record, and publishes a NATS JetStream message.
-2. **Ingest workers** (4 replicas) pull from NATS, fetch the blob, decompress, and split files. Codebases are extracted from archives with filtering (skip dotfiles, `node_modules`, `__pycache__`, binaries; 1 MB/file limit; 2000 file cap).
+2. **Ingest workers** (4 replicas, `fetch_batch=1`) pull from NATS one message at a time, limiting concurrent indexing to the number of workers. Each worker fetches the blob, decompresses, and splits files. Codebases are extracted from archives with filtering (skip dotfiles, `node_modules`, `__pycache__`, binaries; 1 MB/file limit; 2000 file cap).
 3. **Code preprocessor** (2 replicas) parses code files via tree-sitter into natural-language Markdown descriptions. PDFs are split into 50-page chunks via pdfplumber. All files are tagged with a `<!-- filetype:xxx -->` marker (code, yaml, config, json, bash, or text) before forwarding.
 4. **LightRAG** receives the processed text, embeds it via vLLM (Qwen3-Embedding-0.6B, 1024-dim), and extracts entities and relations via vLLM (Qwen3-30B-A3B Q4_K_M) using filetype-specific prompts, examples, and entity types. Results are stored in pgvector + Neo4j.
-5. **Ingest worker** polls LightRAG's `/documents/pipeline_status` until indexing completes, then marks the job done.
+5. **Ingest worker** polls LightRAG's `/documents/track_status` until indexing completes (round-trip), then marks the job as completed or failed. Jobs show accurate final status rather than staying in "indexing".
 
 ### Burst Mode
 

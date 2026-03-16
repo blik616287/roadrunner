@@ -2,9 +2,10 @@ import logging
 import math
 
 import httpx
-from fastapi import APIRouter, Header
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Header
+from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..auth import get_current_user
 from ..config import Settings
 from ..models import DataQueryRequest, DataQueryResponse, GraphSubgraph, Choice, ChatMessage
 from ..services import archival_memory, query_tracker, reconcile
@@ -27,6 +28,7 @@ def init_data_query(settings: Settings, client: httpx.AsyncClient):
 async def data_query(
     request: DataQueryRequest,
     x_workspace: str | None = Header(default=None, alias="x-workspace"),
+    _user: dict = Depends(get_current_user),
 ):
     workspace = request.workspace or x_workspace or "default"
     mode = request.mode or "hybrid"
@@ -87,12 +89,80 @@ async def data_query(
     )
 
 
+def _build_sources(data: dict, max_sources: int = 10) -> list[dict]:
+    """Build numbered source list from chunks (file-backed sources only)."""
+    sources = []
+    seen = set()
+
+    for c in data.get("chunks", []):
+        if len(sources) >= max_sources:
+            break
+        content = c.get("content", "")
+        file_path = c.get("file_path", "")
+        if not file_path or not content or file_path in seen:
+            continue
+        seen.add(file_path)
+        snippet = content[:150].replace("\n", " ").strip()
+        if len(content) > 150:
+            snippet += "..."
+        sources.append({"label": file_path, "snippet": snippet})
+
+    return sources
+
+
+def _format_context_numbered(data: dict, sources: list[dict]) -> str:
+    """Format context with numbered source references for LLM."""
+    parts = []
+
+    entities = data.get("entities", [])
+    if entities:
+        lines = []
+        for e in entities[:15]:
+            name = e.get("entity_name", "?")
+            etype = e.get("entity_type", "?")
+            desc = e.get("description", "")
+            if desc:
+                lines.append(f"- [{etype}] {name}: {desc}")
+            else:
+                lines.append(f"- [{etype}] {name}")
+        parts.append("Entities:\n" + "\n".join(lines))
+
+    relations = data.get("relations", [])
+    if relations:
+        lines = []
+        for r in relations[:10]:
+            src = r.get("src_id", "?")
+            tgt = r.get("tgt_id", "?")
+            desc = r.get("description", "relates to")
+            lines.append(f"- {src} -> {tgt}: {desc}")
+        parts.append("Relations:\n" + "\n".join(lines))
+
+    if sources:
+        lines = []
+        for i, s in enumerate(sources, 1):
+            lines.append(f"[{i}] {s['label']}: {s['snippet']}")
+        parts.append("Sources:\n" + "\n".join(lines))
+
+    return "\n\n".join(parts)
+
+
+def _format_sources_footer(sources: list[dict]) -> str:
+    """Format numbered sources as markdown footer."""
+    if not sources:
+        return ""
+    lines = ["\n\n---\n\n**Sources**\n"]
+    for i, s in enumerate(sources, 1):
+        lines.append(f"{i}. **{s['label']}** — {s['snippet']}")
+    return "\n".join(lines)
+
+
 @router.post("/v1/data/explain")
 async def data_explain(
     request: DataQueryRequest,
     x_workspace: str | None = Header(default=None, alias="x-workspace"),
+    _user: dict = Depends(get_current_user),
 ):
-    """Retrieve graph data then synthesize an LLM explanation via vllm-query."""
+    """Retrieve graph data then stream an LLM explanation via vllm-query."""
     workspace = request.workspace or x_workspace or "default"
     mode = request.mode or "hybrid"
 
@@ -100,11 +170,22 @@ async def data_explain(
     data = await archival_memory.query(
         request.query, workspace, mode=mode, client=_http_client
     )
-    context = archival_memory.format_context(data)
+    sources = _build_sources(data)
+    context = _format_context_numbered(data, sources)
     if not context:
-        return {"response": "No relevant data found in the knowledge graph."}
+        async def empty():
+            yield "data: No relevant data found in the knowledge graph.\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(empty(), media_type="text/event-stream")
 
-    # Call vllm-query for LLM synthesis
+    source_refs = ""
+    if sources:
+        numbered = ", ".join(f"[{i}]" for i in range(1, len(sources) + 1))
+        source_refs = (
+            f" Use inline citations like [1], [2], etc. to reference the numbered sources "
+            f"({numbered}) provided in the context. Cite the most relevant source for each claim."
+        )
+
     messages = [
         {
             "role": "system",
@@ -112,6 +193,8 @@ async def data_explain(
                 "You are a knowledgeable assistant. Based on the knowledge graph data below, "
                 "provide a clear, well-structured answer to the user's question. "
                 "Reference specific entities, relationships, and code when relevant."
+                + source_refs
+                + "\n/no_think"
             ),
         },
         {
@@ -120,31 +203,64 @@ async def data_explain(
         },
     ]
 
-    try:
-        resp = await _http_client.post(
-            f"{_settings.query_llm_url}/chat/completions",
-            json={
-                "model": _settings.query_llm_model,
-                "messages": messages,
-                "max_tokens": 2048,
-                "temperature": 0.7,
-            },
-            timeout=60.0,
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        answer = result["choices"][0]["message"]["content"]
-        return {"response": answer}
-    except Exception as e:
-        logger.error(f"Explain LLM call failed: {e}")
-        # Fall back to raw context
-        return {"response": context}
+    footer = _format_sources_footer(sources)
+
+    async def stream_response():
+        in_think = False
+        try:
+            async with _http_client.stream(
+                "POST",
+                f"{_settings.query_llm_url}/chat/completions",
+                json={
+                    "model": _settings.query_llm_model,
+                    "messages": messages,
+                    "max_tokens": 512,
+                    "temperature": 0.7,
+                    "stream": True,
+                },
+                timeout=300.0,
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    # Strip <think>...</think> blocks from Qwen3 models
+                    payload = line[6:].strip()
+                    if payload and payload[0] == "{":
+                        try:
+                            import json as _j
+                            chunk = _j.loads(payload)
+                            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if "<think>" in content:
+                                in_think = True
+                                continue
+                            if "</think>" in content:
+                                in_think = False
+                                continue
+                            if in_think:
+                                continue
+                        except Exception:
+                            pass
+                    yield line + "\n\n"
+        except Exception as e:
+            logger.error(f"Explain LLM stream failed: {e}")
+            yield f"data: [Error: {e}]\n\n"
+
+        # Append sources footer after LLM stream completes
+        if footer:
+            import json as _json
+            chunk = {"choices": [{"delta": {"content": footer}}]}
+            yield f"data: {_json.dumps(chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(stream_response(), media_type="text/event-stream")
 
 
 @router.post("/v1/data/reconcile")
 async def data_reconcile(
     workspace: str | None = None,
     x_workspace: str | None = Header(default=None, alias="x-workspace"),
+    _user: dict = Depends(get_current_user),
 ):
     """Find disconnected graph clusters and create bridge edges."""
     ws = workspace or x_workspace or "default"
@@ -160,6 +276,7 @@ RELATION_VDB_TABLE = "lightrag_vdb_relation_qwen_qwen3_embedding_0_6b_1024d"
 async def data_weights(
     workspace: str | None = None,
     x_workspace: str | None = Header(default=None, alias="x-workspace"),
+    _user: dict = Depends(get_current_user),
 ):
     """Return blended weights (chunks + degree) for entities and chunk counts for relations."""
     ws = workspace or x_workspace or "default"
