@@ -20,7 +20,7 @@ async def query(
         client = httpx.AsyncClient()
         should_close = True
 
-    payload = {"query": text, "mode": mode}
+    payload = {"query": text, "mode": mode, "top_k": 10, "chunk_top_k": 10}
     # For graph-aware modes, supply keywords from the query text to skip
     # LLM keyword extraction (which is slow and may timeout)
     if mode in ("local", "global", "hybrid", "mix"):

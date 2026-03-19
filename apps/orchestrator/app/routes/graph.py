@@ -102,3 +102,60 @@ async def get_top_graph(
         "total_edges": total_edges,
         "truncated": len(nodes) >= limit,
     }
+
+
+@router.get("/v1/graph/search")
+async def search_graph(
+    workspace: str = Query(...),
+    q: str = Query(..., min_length=1),
+    limit: int = Query(default=200, le=2000),
+    _user: dict = Depends(get_current_user),
+):
+    """Search graph nodes by name/description and return matching subgraph with edges."""
+    if not re.match(r'^[a-zA-Z0-9_-]+$', workspace):
+        raise HTTPException(400, "Invalid workspace name")
+    safe_label = f"`{workspace}`"
+
+    async with _driver.session() as session:
+        result = await session.run(
+            f"""
+            MATCH (n:{safe_label})
+            WHERE toLower(n.entity_id) CONTAINS toLower($q)
+               OR toLower(n.description) CONTAINS toLower($q)
+            WITH n, size([(n)-[]-() | 1]) AS degree
+            ORDER BY degree DESC
+            LIMIT $limit
+            WITH collect(n) AS matchedNodes, collect(id(n)) AS matchedIds
+            UNWIND matchedNodes AS n
+            OPTIONAL MATCH (n)-[r]-(m)
+            WHERE id(m) IN matchedIds
+            RETURN
+              collect(DISTINCT {{
+                id: toString(id(n)),
+                label: coalesce(n.entity_id, n.name, toString(id(n))),
+                type: coalesce(n.entity_type, 'unknown'),
+                description: n.description
+              }}) AS nodes,
+              collect(DISTINCT {{
+                source: toString(id(startNode(r))),
+                target: toString(id(endNode(r))),
+                label: coalesce(type(r), ''),
+                description: r.description
+              }}) AS edges
+            """,
+            q=q,
+            limit=limit,
+        )
+        record = await result.single()
+
+    nodes = record["nodes"] if record else []
+    edges = record["edges"] if record else []
+    edges = [e for e in edges if e.get("source") and e.get("target")]
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "truncated": len(nodes) >= limit,
+    }
