@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { queryGraph, getTopGraph, getWeights } from '../api';
+import { searchGraph, getTopGraph, getWeights } from '../api';
 
 export function useGraph(workspace, limit = 2000) {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
@@ -65,33 +65,20 @@ export function useGraph(workspace, limit = 2000) {
     }
   }, [workspace, limit, applyWeights, fetchWeights]);
 
-  const fetchGraph = useCallback(async (query, mode = 'local') => {
+  const fetchGraph = useCallback(async (query) => {
     if (!workspace) return;
     try {
       setLoading(true);
       setError(null);
       const [data, weightData] = await Promise.all([
-        queryGraph(query, workspace, mode),
+        searchGraph(workspace, query),
         fetchWeights(),
       ]);
       setWeights(weightData);
-      const entities = data.data?.entities || data.entities || [];
-      const relations = data.data?.relationships || data.data?.relations || data.relationships || data.relations || [];
-      const nodes = entities.map((e) => ({
-        id: e.entity_name || e.name,
-        label: e.entity_name || e.name,
-        type: e.entity_type || e.type || 'unknown',
-        description: e.description || '',
-      }));
-      const edges = relations.map((r) => ({
-        source: r.src_id || r.source,
-        target: r.tgt_id || r.target,
-        label: r.description || r.relation || '',
-      }));
-      const graph = applyWeights(nodes, edges, weightData);
+      const graph = applyWeights(data.nodes || [], data.edges || [], weightData);
       setGraphData(graph);
-      setTruncated(false);
-      setTotalCount(graph.nodes.length);
+      setTruncated(data.truncated || false);
+      setTotalCount(data.node_count || graph.nodes.length);
     } catch (e) {
       setError(e.message);
       setGraphData({ nodes: [], links: [] });

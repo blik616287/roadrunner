@@ -165,6 +165,9 @@ export const reconcileGraph = (workspace) =>
 export const getTopGraph = (workspace, limit = 2000) =>
   request(`${API}/v1/graph/top?workspace=${encodeURIComponent(workspace)}&limit=${limit}`);
 
+export const searchGraph = (workspace, q, limit = 200) =>
+  request(`${API}/v1/graph/search?workspace=${encodeURIComponent(workspace)}&q=${encodeURIComponent(q)}&limit=${limit}`);
+
 export const getGraphLabels = (workspace) =>
   request(`${LIGHTRAG}/graph/label/list`, {
     headers: { 'LIGHTRAG-WORKSPACE': workspace },
