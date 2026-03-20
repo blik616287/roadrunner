@@ -10,7 +10,7 @@
 
 ## Overview
 
-Roadrunner turns unstructured content — source code, PDFs, Markdown, plaintext — into a queryable knowledge graph. Code files are parsed with tree-sitter into natural-language descriptions, then embedded and linked as entities and relations in a Neo4j graph backed by pgvector. Queries return raw graph subgraphs (entities, relations, source chunks) in an OpenAI-compatible response format.
+Roadrunner turns unstructured content — source code, PDFs, Markdown, plaintext — into a queryable knowledge graph. Code files are parsed with tree-sitter into natural-language descriptions, then embedded and linked as entities and relations in a Neo4j graph backed by pgvector. Large documents are automatically chunked at ingestion time (4000 chars) to prevent processing timeouts. Queries return raw graph subgraphs (entities, relations, source chunks) in an OpenAI-compatible response format, with optional streaming LLM explanations.
 
 ```mermaid
 graph TD
@@ -33,17 +33,20 @@ graph TD
 
     subgraph gpu ["GPU Layer - MPS"]
         VE["vLLM-extract Qwen3-30B-A3B"]
-        VQ["vLLM-query Qwen3-30B-A3B"]
-        VR["vLLM-rerank bge-reranker-v2-m3"]
         OE["vLLM-embed qwen3-embedding"]
+    end
+
+    subgraph cpu ["CPU Layer"]
+        CQ["cpu-query Qwen3-4B GGUF"]
+        CR["cpu-rerank bge-reranker-v2-m3"]
     end
 
     LR --> PG
     LR --> N4J
     LR --> VE
-    LR --> VR
+    LR --> CR
     LR --> OE
-    API --> VQ
+    API --> CQ
     API --> RD
     IW --> PG
 ```
@@ -63,25 +66,21 @@ The ingestion UI (`http://localhost:31300`) is a full-featured management consol
 
 Workspace overview with card-based layout. Each card shows document counts, job status breakdown (queued / processing / completed / failed), and last activity. Click a workspace to switch into it, or delete it with a confirmation dialog. Create new workspaces directly from the dashboard via the inline creation card. Paginated with configurable page size (10 / 25 / 50 / 100).
 
-### Ingest
+### Data (Ingest + Jobs + Documents)
 
-Drag-and-drop file upload with automatic type detection — archives (`.tar.gz`, `.zip`) are routed as codebase ingestions, everything else as document ingestions. Supports multi-file and full directory uploads via recursive traversal. Recent jobs appear below the drop zone with live status updates.
+Unified data management page combining ingestion, job tracking, and document management in a single view:
 
-### Jobs
-
-Real-time job tracker with **3-second auto-polling**. Filter by status (queued, processing, indexing, completed, failed). Click any row to expand and see the full job ID, doc ID, attempt count, error messages, extracted file lists, and raw result JSON. All columns are sortable (persisted across reloads). Paginated with configurable page size.
-
-### Documents
-
-Unified view merging orchestrator records with LightRAG indexing status into a single status column. Download originals or delete documents — deletion cascades through both the orchestrator DB and the knowledge graph. Orphaned documents (in LightRAG but not the orchestrator) are highlighted for cleanup. All columns are sortable (persisted across reloads). Paginated with configurable page size.
+- **Drag-and-drop file upload** with automatic type detection — archives (`.tar.gz`, `.zip`) are routed as codebase ingestions, everything else as document ingestions. Supports multi-file and full directory uploads via recursive traversal.
+- **Job tracker** with auto-polling. Filter by status (queued, processing, indexing, completed, failed). Retry failed jobs individually or in bulk. Prioritize queued jobs.
+- **Document table** merging orchestrator records with LightRAG indexing status into a single status column. Download originals or delete documents — deletion cascades through both the orchestrator DB and the knowledge graph. All columns are sortable with column-level filtering.
 
 ### Graph Explorer
 
-Interactive force-directed knowledge graph visualization. Nodes are **color-coded by entity type** (person, organization, technology, function, class, module, file, and more). Click any node to inspect its name, type, and description in a detail panel. Zoom, pan, and fit-to-screen controls. Search to filter the graph to a local subgraph, or load the full graph across all entity types. Tuned d3-force parameters (adaptive charge strength, link distance, velocity decay) for well-spaced layouts even on large graphs. Labels render only above a zoom threshold to keep the view clean.
+Interactive force-directed knowledge graph visualization. Nodes are **color-coded by entity type** (person, organization, technology, function, class, module, file, and more). Total entity and relationship counts are displayed for the workspace. Click any node to inspect its name, type, and description in a detail panel. Zoom, pan, and fit-to-screen controls. **Weight visualization mode** scales node size and link width by chunk count and degree. Search filters the graph instantly via Neo4j text search (sub-second), or load the full top-N graph by degree. **Reconcile** finds disconnected graph clusters and creates bridge edges. Tuned d3-force parameters (adaptive charge strength, link distance, velocity decay) for well-spaced layouts even on large graphs. Labels render only above a zoom threshold to keep the view clean.
 
 ### Query
 
-Five query modes in one interface: **vector search** (naive), **vector + graph** (mix), **graph local** (subgraph around matched entities), **graph global** (full traversal), and **graph hybrid**. Results are organized into collapsible sections for chunks (with expandable 300-char previews), entities, and relationships. Hit **Explain** to get a **streaming markdown-rendered LLM explanation** with inline citations (`[1]`, `[2]`, ...) and a numbered sources footer, powered by the dedicated vllm-query instance.
+Five query modes in one interface: **vector search** (naive), **vector + graph** (mix), **graph local** (subgraph around matched entities), **graph global** (full traversal), and **graph hybrid**. Results are organized into collapsible sections for chunks (with expandable 300-char previews), entities, and relationships. Hit **Explain** to get a **streaming markdown-rendered LLM explanation** with inline citations (`[1]`, `[2]`, ...) and a numbered sources footer, powered by the dedicated cpu-query instance (Qwen3-4B). SSE keepalive pings maintain the connection during CPU prompt evaluation.
 
 ---
 
@@ -97,7 +96,7 @@ Five query modes in one interface: **vector search** (naive), **vector + graph**
 | **Shell** | `.sh` `.bash` `.zsh` `.fish` |
 | **Archives** (codebase ingest) | `.tar.gz` `.zip` `.tar.bz2` |
 
-Code files get tree-sitter parsing into natural-language Markdown. YAML, config, JSON, and shell files are ingested with filetype-specific extraction prompts tuned for their structure. Documents are passed through directly (PDFs are split into 50-page chunks).
+Code files get tree-sitter parsing into natural-language Markdown. YAML, config, JSON, and shell files are ingested with filetype-specific extraction prompts tuned for their structure. Documents are passed through directly (PDFs are split into 50-page chunks). Large files exceeding 4000 characters are automatically chunked at ingestion time with each chunk processed as a separate NATS message.
 
 ## Prerequisites
 
@@ -122,7 +121,7 @@ This sets up k8s 1.34, containerd, Helm, NVIDIA MPS (4 GPU slices), and Longhorn
 ansible-playbook -i inventory.ini download-models.yml
 ```
 
-Pre-populates persistent volumes with Qwen3-30B-A3B Q4_K_M GGUF (extraction), Qwen3-Embedding-0.6B (embedding), and bge-reranker-v2-m3 (reranking).
+Pre-populates persistent volumes with Qwen3-30B-A3B Q4_K_M GGUF (extraction), Qwen3-4B Q4_K_M GGUF (CPU query), Qwen3-Embedding-0.6B (embedding), and bge-reranker-v2-m3 (reranking).
 
 **3. Deploy the pipeline:**
 
@@ -170,12 +169,13 @@ curl -X POST http://localhost:31800/v1/data/query \
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/v1/documents/ingest` | Upload a single file. Set workspace via `X-Workspace` header. |
+| `POST` | `/v1/documents/ingest` | Upload a single file. Set workspace via `X-Workspace` header. Large files are auto-chunked (4000 chars). |
 | `POST` | `/v1/codebase/ingest` | Upload a `.tar.gz` / `.zip` archive. Filters out dotfiles, `node_modules`, binaries; max 2000 files. |
 | `GET`  | `/v1/jobs/{job_id}` | Poll ingestion job status. |
 | `GET`  | `/v1/jobs?workspace=X&status=Y` | List jobs, optionally filtered. |
 | `POST` | `/v1/jobs/{job_id}/retry` | Retry a single failed job. |
 | `POST` | `/v1/jobs/retry-failed?workspace=X` | Retry all failed jobs in a workspace. |
+| `POST` | `/v1/jobs/{job_id}/prioritize` | Move a queued job to the priority queue for faster processing. |
 
 ### Query
 
@@ -217,7 +217,12 @@ curl -X POST http://localhost:31800/v1/data/query \
 }
 ```
 
-**Note:** The `/v1/chat/completions` endpoint has been removed and returns `410 Gone`. Use `/v1/data/query` for graph queries and `/v1/data/explain` for LLM-synthesized answers.
+### Graph
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/v1/graph/top?workspace=X&limit=N` | Return top N nodes by degree with their edges from Neo4j. Includes total entity/relationship counts. |
+| `GET` | `/v1/graph/search?workspace=X&q=TEXT` | Search graph nodes by name/description. Sub-second Neo4j text search with edges. |
 
 ### Workspace Management
 
@@ -232,13 +237,6 @@ curl -X POST http://localhost:31800/v1/data/query \
 |---|---|---|
 | `GET` | `/v1/documents/{doc_id}/download` | Download the original file. |
 | `DELETE` | `/v1/documents/{doc_id}` | Delete a document and its graph entries (cascades to LightRAG). |
-
-### Sessions
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/v1/sessions?workspace=X` | List sessions, optionally filtered by workspace. |
-| `DELETE` | `/v1/sessions/{session_id}` | Delete a session (working memory + recall memory). |
 
 ### Internal
 
@@ -272,11 +270,13 @@ sequenceDiagram
     participant GPU as GPU Layer
 
     U->>O: POST /v1/documents/ingest
-    O->>PG: Store gzip blob, create job
-    O->>NQ: Publish ingest message
+    O->>O: Chunk large files (4000 chars)
+    O->>PG: Store gzip blob, create job(s)
+    O->>NQ: Publish ingest message(s)
     O-->>U: 200 job_id, status queued
 
-    NQ->>IW: Pull message
+    NQ->>IW: Pull message (1 per worker)
+    IW->>IW: msg.in_progress() extends ack deadline
     IW->>PG: Fetch blob, decompress
     IW->>CP: Send files in batches of 20
 
@@ -285,33 +285,34 @@ sequenceDiagram
     else PDF files
         CP->>CP: pdfplumber to 50-page chunks
     else Text / Markdown / YAML / Config / JSON / Shell
-        CP->>CP: Pass through
+        CP->>CP: Pass through (chunk if >4000 chars)
     end
 
     Note over CP: Tag with filetype marker
 
     CP->>LR: POST /documents/text
     LR->>GPU: Embed via vLLM 1024-dim
-    LR->>GPU: Extract entities via vLLM
+    LR->>GPU: Extract entities via vLLM (max 512 tokens)
     LR->>PG: Store vectors in pgvector
     LR->>PG: Store KV and doc status
 
     loop Poll until indexed
         IW->>LR: GET /documents/pipeline_status
+        IW->>NQ: msg.in_progress()
     end
 
     IW->>PG: Mark job completed
 ```
 
-1. **Orchestrator** receives the upload, gzip-compresses the blob into PostgreSQL, creates a job record, and publishes a NATS JetStream message.
-2. **Ingest workers** (4 replicas, `fetch_batch=1`) pull from NATS one message at a time, limiting concurrent indexing to the number of workers. Each worker fetches the blob, decompresses, and splits files. Codebases are extracted from archives with filtering (skip dotfiles, `node_modules`, `__pycache__`, binaries; 1 MB/file limit; 2000 file cap).
-3. **Code preprocessor** (2 replicas) parses code files via tree-sitter into natural-language Markdown descriptions. PDFs are split into 50-page chunks via pdfplumber. All files are tagged with a `<!-- filetype:xxx -->` marker (code, yaml, config, json, bash, or text) before forwarding.
-4. **LightRAG** receives the processed text, embeds it via vLLM (Qwen3-Embedding-0.6B, 1024-dim), and extracts entities and relations via vLLM (Qwen3-30B-A3B Q4_K_M) using filetype-specific prompts, examples, and entity types. Results are stored in pgvector + Neo4j.
-5. **Ingest worker** polls LightRAG's `/documents/track_status` until indexing completes (round-trip), then marks the job as completed or failed. Jobs show accurate final status rather than staying in "indexing".
+1. **Orchestrator** receives the upload, auto-chunks large files (>4000 chars) into separate documents and jobs, gzip-compresses each blob into PostgreSQL, creates job records, and publishes NATS JetStream messages. Priority messages use the `ingest.priority.document` subject.
+2. **Ingest workers** (4 replicas, `fetch_batch=1`) pull from NATS one message at a time. Each worker calls `msg.in_progress()` during polling to extend the 600-second ack deadline and prevent redelivery. Workers fetch the blob, decompress, and split files. Codebases are extracted from archives with filtering (skip dotfiles, `node_modules`, `__pycache__`, binaries; 1 MB/file limit; 2000 file cap).
+3. **Code preprocessor** (2 replicas) parses code files via tree-sitter into natural-language Markdown descriptions. PDFs are split into 50-page chunks via pdfplumber. Large text is chunked at 4000 characters. All files are tagged with a `<!-- filetype:xxx -->` marker (code, yaml, config, json, bash, or text) before forwarding.
+4. **LightRAG** receives the processed text, embeds it via vLLM (Qwen3-Embedding-0.6B, 1024-dim), and extracts entities and relations via vLLM (Qwen3-30B-A3B Q4_K_M, max 512 tokens) using filetype-specific prompts, examples, and entity types. Internal chunk size is 4000 tokens to avoid double-chunking pre-chunked documents. Results are stored in pgvector + Neo4j.
+5. **Ingest worker** polls LightRAG's `/documents/track_status` until indexing completes (round-trip), calling `msg.in_progress()` each poll cycle to keep the NATS ack deadline alive. Jobs show accurate final status rather than staying in "indexing".
 
 ### Burst Mode
 
-When the ingestion queue backs up, the queue-scaler automatically frees GPU memory for throughput:
+When the ingestion queue backs up, the queue-scaler automatically frees CPU resources for throughput:
 
 ```mermaid
 stateDiagram-v2
@@ -321,27 +322,27 @@ stateDiagram-v2
 
     state NORMAL {
         direction LR
-        n1: Reranker replicas = 1
+        n1: cpu-rerank replicas = 1
         n2: Queries available
     }
 
     state BURST {
         direction LR
-        b1: Reranker replicas = 0
+        b1: cpu-rerank replicas = 0
         b2: Queries return 503
     }
 ```
 
-### GPU Memory Layout
+### GPU / CPU Layout
 
-Four MPS slices share the GB10's unified 128 GB memory. vLLM instances are started sequentially during deployment — largest allocation first — to avoid memory races on the unified pool.
+The extraction and embedding models run on GPU via MPS. Query and reranking run on CPU to free GPU memory for ingestion throughput.
 
-| Slice | Model | gpu-memory-utilization | Purpose |
+| Service | Model | Runtime | Purpose |
 |---|---|---|---|
-| vLLM-extract | Qwen3-30B-A3B (Q4_K_M GGUF) | 0.35 | Entity/relation extraction |
-| vLLM-query | Qwen3-30B-A3B (Q4_K_M GGUF) | 0.17 | Explain / synthesis for queries |
-| vLLM-rerank | bge-reranker-v2-m3 | — | Query result reranking |
-| vLLM-embed | Qwen3-Embedding-0.6B | 0.03 | 1024-dim document embedding |
+| vLLM-extract | Qwen3-30B-A3B (Q4_K_M GGUF) | GPU (MPS, 0.50 util) | Entity/relation extraction |
+| vLLM-embed | Qwen3-Embedding-0.6B | GPU (MPS, 0.03 util) | 1024-dim document embedding |
+| cpu-query | Qwen3-4B (Q4_K_M GGUF) | CPU (llama-cpp-python) | LLM explanations for queries |
+| cpu-rerank | bge-reranker-v2-m3 | CPU (sentence-transformers) | Query result reranking |
 
 ### Storage
 
@@ -349,8 +350,8 @@ Four MPS slices share the GB10's unified 128 GB memory. vLLM instances are start
 |---|---|
 | **PostgreSQL + pgvector** | Document blobs, job records, vector embeddings (HNSW), LightRAG KV/doc status |
 | **Neo4j** | Knowledge graph (entities, relations) |
-| **Redis** | Working memory (session turns, 2h TTL), query activity tracking |
-| **NATS JetStream** | Ingestion job queue (workqueue retention, 3 retries, 600s ack timeout) |
+| **Redis** | Query activity tracking |
+| **NATS JetStream** | Ingestion job queue (workqueue retention, 3 retries, 600s ack timeout, priority subject support) |
 
 ## Configuration
 
@@ -360,26 +361,34 @@ All model and pipeline settings live in `group_vars/k8s.yml`. To swap a model, c
 models:
   extract:
     tag: "Qwen/Qwen3-30B-A3B"
-    source: gguf                          # downloads GGUF quant + tokenizer
+    source: gguf
     gguf_repo: "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF"
     gguf_file: "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
     served_model_name: "qwen3-30b-a3b-extract"
-    num_ctx: "8192"
+    num_ctx: "16384"
+  query_cpu:
+    tag: "Qwen/Qwen3-4B"
+    source: gguf
+    gguf_repo: "unsloth/Qwen3-4B-GGUF"
+    gguf_file: "Qwen3-4B-Q4_K_M.gguf"
   embed:
-    tag: "Qwen/Qwen3-Embedding-0.6B"     # vLLM pooling model for embeddings
+    tag: "Qwen/Qwen3-Embedding-0.6B"
     source: huggingface
   reranker:
-    tag: "BAAI/bge-reranker-v2-m3"       # HuggingFace model for reranking
+    tag: "BAAI/bge-reranker-v2-m3"
     source: huggingface
 
 graphrag:
   ingest_worker_replicas: 4
   code_preprocessor_replicas: 2
+  llmMaxTokens: 512              # extraction token limit per chunk
+  chunkSize: 4000                # LightRAG internal chunk size (tokens)
+  maxAsync: 16                   # concurrent LightRAG extraction tasks
   queue_scaler:
-    poll_interval: 15       # seconds between NATS queue checks
-    burst_threshold: 10     # pending messages to trigger burst
-    burst_hysteresis_up: 3  # consecutive polls before entering burst
-    burst_hysteresis_down: 5  # consecutive polls before exiting burst
+    poll_interval: 15
+    burst_threshold: 10
+    burst_hysteresis_up: 3
+    burst_hysteresis_down: 5
 ```
 
 Additional test models for benchmarking are defined under `test_models:` in the same file. Download them with `-e download_test_models=true`.
@@ -397,11 +406,13 @@ ansible-playbook -i inventory.ini remove-k8s.yml        # remove k8s, containerd
 
 ```
 ├── apps/
-│   ├── orchestrator/        # FastAPI — API gateway, ingestion, data query
+│   ├── orchestrator/        # FastAPI — API gateway, ingestion, data query, graph search
 │   ├── ingest-worker/       # Async NATS consumer, document processing
-│   ├── code-preprocessor/   # Tree-sitter parsing, PDF extraction
+│   ├── code-preprocessor/   # Tree-sitter parsing, PDF extraction, text chunking
 │   ├── lightrag/            # Patched LightRAG with multi-workspace support
 │   ├── ingestion-ui/        # React 19 / Vite / Tailwind management UI
+│   ├── cpu-query/           # Qwen3-4B GGUF via llama-cpp-python (query LLM)
+│   ├── cpu-rerank/          # bge-reranker-v2-m3 via sentence-transformers (reranking)
 │   └── queue-scaler/        # NATS queue-depth auto-scaler
 ├── charts/graphrag/         # Helm chart (all k8s resources)
 ├── group_vars/k8s.yml       # Model + pipeline config (single source of truth)
@@ -410,5 +421,5 @@ ansible-playbook -i inventory.ini remove-k8s.yml        # remove k8s, containerd
 ├── deploy-graphrag.yml      # Ansible: build images + helm install
 ├── remove-graphrag.yml      # Ansible: teardown pipeline
 ├── remove-k8s.yml           # Ansible: teardown k8s
-└── static/                 # Logo, misc_docs (benchmarks, test plans, evaluation results)
+└── static/                  # Logo, test docs, benchmarks, evaluation results
 ```
